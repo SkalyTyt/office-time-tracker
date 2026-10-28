@@ -287,7 +287,7 @@ async function tabRecords(pane) {
     <div class="row"><div><label>Сотрудник</label><select id="fu"><option value="">Все</option>${users.map(u => `<option value="${u.id}" ${f.user == u.id ? 'selected' : ''}>${esc(u.fio)}</option>`).join('')}</select></div>
     <div><label>С даты</label><input type="date" id="ff" value="${f.from}"></div>
     <div><label>По дату</label><input type="date" id="ft" value="${f.to}"></div>
-    <a class="btn ghost" href="/api/admin/export.csv?${qs()}" style="text-decoration:none">Скачать CSV</a></div>
+    <a class="btn ghost" href="/api/admin/export.xlsx?${qs()}" style="text-decoration:none">Скачать Excel</a></div>
     <div style="margin-top:12px">${table(['Сотрудник', 'Тип', 'Дата', 'Начало', 'Конец', 'Часов'], rows.map(r => [
       esc(r.fio), kindPill(r.kind), fmtDate(r.date), fmtTime(r.start_ts), (r.end_ts ? fmtTime(r.end_ts) : '<span class="pill green">идёт</span>') + (r.end_manual ? ' <span class="mark">указано вручную</span>' : ''), hours(r.start_ts, r.end_ts)
     ]))}</div></div>`;

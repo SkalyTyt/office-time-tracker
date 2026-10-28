@@ -68,15 +68,6 @@
       (!q.kind || (q.kind === 'extra' ? r.kind !== 'office' : r.kind === q.kind))).slice(0, 1000)
       .map(r => ({ id: r.id, date: r.date, start_ts: r.start_ts, end_ts: r.end_ts, kind: r.kind, end_manual: r.end_manual, fio: user(r.user_id).fio, user_id: r.user_id }));
   }
-  function csv(q) {
-    const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const fmt = t => t ? new Date(t).toLocaleString('ru-RU') : '';
-    const lines = ['ФИО;Тип;Дата;Начало;Конец;Часов'].concat(recordsQuery(q).map(r => {
-      const h = r.end_ts ? ((new Date(r.end_ts) - new Date(r.start_ts)) / 3600000).toFixed(2) : '';
-      return [r.fio, LABELS[r.kind] || 'офис', r.date, fmt(r.start_ts), fmt(r.end_ts), h].map(esc).join(';');
-    }));
-    return '﻿' + lines.join('\r\n');
-  }
 
   function route(method, path, q, b) {
     if (method === 'POST' && path === '/api/forgot') {
@@ -229,8 +220,9 @@
       const d = db.docs.find(x => x.id === +m[1]); if (!d) return;
       const bin = atob(d.data), arr = Uint8Array.from(bin, c => c.charCodeAt(0));
       download(d.filename, new Blob([arr], { type: d.mime || 'application/octet-stream' }));
-    } else if (u.pathname === '/api/admin/export.csv') {
-      download('tabel.csv', new Blob([csv(Object.fromEntries(u.searchParams))], { type: 'text/csv;charset=utf-8' }));
+    } else if (u.pathname === '/api/admin/export.xlsx') {
+      download('tabel.xlsx', new Blob([XlsxLite.report(recordsQuery(Object.fromEntries(u.searchParams)))],
+        { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     }
   });
 

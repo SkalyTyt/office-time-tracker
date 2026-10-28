@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const XlsxLite = require('./public/xlsx-lite.js');
 
 const PORT = process.env.PORT || 3000;
 const DATA = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -191,7 +192,7 @@ function adminOverview() {
     FROM users u WHERE u.active=1 ORDER BY u.fio`).all(d, d, d);
 }
 
-function recordsQuery(q) {
+function recordsQuery(q, limit = 1000) {
   const where = ['1=1']; const args = [];
   if (q.user) { where.push('r.user_id=?'); args.push(+q.user); }
   if (q.from) { where.push('r.date>=?'); args.push(q.from); }
@@ -201,7 +202,7 @@ function recordsQuery(q) {
   return db.prepare(`
     SELECT r.id,r.date,r.start_ts,r.end_ts,r.kind,r.end_manual,u.fio,u.id AS user_id
     FROM records r JOIN users u ON u.id=r.user_id
-    WHERE ${where.join(' AND ')} ORDER BY r.id DESC LIMIT 1000`).all(...args);
+    WHERE ${where.join(' AND ')} ORDER BY r.id DESC LIMIT ${Math.floor(limit)}`).all(...args);
 }
 
 function adminCount() {
@@ -366,17 +367,13 @@ async function api(req, res, url) {
         addLog(user.id, 'Создал(а) сотрудника', `${fio} (${login}), роль: ${role}`);
         return send(res, 200, { ok: true });
       }
-      case 'GET /api/admin/export.csv': {
-        const rows = recordsQuery(q);
-        const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-        const fmt = t => t ? new Date(t).toLocaleString('ru-RU') : '';
-        const lines = ['ФИО;Тип;Дата;Начало;Конец;Часов'].concat(rows.map(r => {
-          const h = r.end_ts ? ((new Date(r.end_ts) - new Date(r.start_ts)) / 3600000).toFixed(2) : '';
-          return [r.fio, LABELS[r.kind] || 'офис', r.date, fmt(r.start_ts), fmt(r.end_ts), h].map(esc).join(';');
-        }));
-        return send(res, 200, '﻿' + lines.join('\r\n'), {
-          'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="tabel.csv"',
+      case 'GET /api/admin/export.xlsx': {
+        const file = Buffer.from(XlsxLite.report(recordsQuery(q, 100000)));
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': 'attachment; filename="tabel.xlsx"', 'Content-Length': file.length,
         });
+        return res.end(file);
       }
     }
     if ((m = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/password$/)) && req.method === 'GET') {
