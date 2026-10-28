@@ -43,7 +43,14 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('records') WHERE name='confirme
   db.exec('ALTER TABLE records ADD COLUMN confirmed_ts TEXT; ALTER TABLE records ADD COLUMN end_manual INTEGER NOT NULL DEFAULT 0');
 if (!db.prepare("SELECT 1 FROM pragma_table_info('records') WHERE name='kind'").get())
   db.exec("ALTER TABLE records ADD COLUMN kind TEXT NOT NULL DEFAULT 'office'");
-
+// вход, запомненный программой на рабочем ПК (kind='pc'), живёт год; админ может «выйти» с ПК сотрудника
+if (!db.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='kind'").get())
+  db.exec("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'web'");
+// программа на рабочих ПК: связь, пауза при отключении питания
+if (!db.prepare("SELECT 1 FROM pragma_table_info('records') WHERE name='agent'").get())
+  db.exec('ALTER TABLE records ADD COLUMN agent INTEGER NOT NULL DEFAULT 0; ALTER TABLE records ADD COLUMN run_id TEXT; ALTER TABLE records ADD COLUMN last_seen_ts TEXT; ALTER TABLE records ADD COLUMN paused_ms INTEGER NOT NULL DEFAULT 0');
+const PAUSE_MIN_MS = 90 * 1000;                                          // меньшие перерывы не считаем паузой
+const MAX_GAP_MS = (+process.env.RESUME_MAX_GAP_HOURS || 4) * 3600e3;    // после такого перерыва смена закрывается сама
 // ---------- утилиты ----------
 const now = () => new Date().toISOString();
 const today = () => new Date().toLocaleDateString('sv'); // YYYY-MM-DD по времени сервера
@@ -188,7 +195,9 @@ function adminOverview() {
       (SELECT MIN(start_ts) FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.date=?) AS first_start,
       (SELECT MAX(end_ts) FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.date=?) AS last_end,
       (SELECT start_ts FROM records r WHERE r.user_id=u.id AND r.kind!='office' AND r.end_ts IS NULL ORDER BY id DESC LIMIT 1) AS evening_open,
-      (SELECT COUNT(*) FROM records r WHERE r.user_id=u.id AND r.kind!='office' AND r.date=?) AS evening
+      (SELECT COUNT(*) FROM records r WHERE r.user_id=u.id AND r.kind!='office' AND r.date=?) AS evening,
+      (SELECT agent FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.end_ts IS NULL ORDER BY id DESC LIMIT 1) AS open_agent,
+      (SELECT last_seen_ts FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.end_ts IS NULL ORDER BY id DESC LIMIT 1) AS open_last_seen
     FROM users u WHERE u.active=1 ORDER BY u.fio`).all(d, d, d);
 }
 
@@ -200,7 +209,7 @@ function recordsQuery(q, limit = 1000) {
   if (q.kind === 'extra') where.push("r.kind!='office'"); // вечернее время и удалённая работа
   else if (q.kind === 'office' || q.kind === 'evening' || q.kind === 'remote') { where.push('r.kind=?'); args.push(q.kind); }
   return db.prepare(`
-    SELECT r.id,r.date,r.start_ts,r.end_ts,r.kind,r.end_manual,u.fio,u.id AS user_id
+    SELECT r.id,r.date,r.start_ts,r.end_ts,r.kind,r.end_manual,r.paused_ms,r.agent,u.fio,u.id AS user_id
     FROM records r JOIN users u ON u.id=r.user_id
     WHERE ${where.join(' AND ')} ORDER BY r.id DESC LIMIT ${Math.floor(limit)}`).all(...args);
 }
@@ -241,6 +250,94 @@ async function api(req, res, url) {
     return send(res, 200, { user: publicUser(u) }, {
       'Set-Cookie': `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}${secure}`,
     });
+  }
+
+  // ----- программа на рабочих компьютерах -----
+  if (route === 'POST /api/agent/login') { // единственный раз: логин и пароль, дальше программа входит по запомненному ключу
+    checkRate(ip);
+    const b = await readJson(req);
+    const u = db.prepare('SELECT * FROM users WHERE login=? AND active=1').get(cleanText(b.login, 64).toLowerCase());
+    const ok = u && crypto.timingSafeEqual(Buffer.from(hashPw(String(b.password || ''), u.salt), 'hex'), Buffer.from(u.hash, 'hex'));
+    if (!ok) { noteFail(ip); fail(401, 'Неверный логин или пароль'); }
+    attempts.delete(ip);
+    const token = crypto.randomBytes(32).toString('hex');
+    db.prepare("INSERT INTO sessions(token,user_id,expires,kind) VALUES(?,?,?,'pc')").run(token, u.id, Date.now() + 365 * 24 * 3600e3);
+    addLog(u.id, 'Вошёл(ла) на рабочем ПК', 'вход запомнен на этом компьютере');
+    return send(res, 200, { token, user: { fio: u.fio, login: u.login } });
+  }
+  if (url.pathname.startsWith('/api/agent/')) {
+    const dev = getUser(req);
+    if (!dev) fail(401, 'Требуется вход');
+    if (req.method !== 'GET' && !(req.headers['content-type'] || '').includes('application/json')) fail(415, 'Неверный тип запроса');
+    const b = req.method === 'POST' ? await readJson(req) : {};
+    const uid = dev.id, runId = cleanText(b.run_id, 64);
+    const openOffice = () => db.prepare("SELECT * FROM records WHERE user_id=? AND kind='office' AND end_ts IS NULL ORDER BY id DESC").get(uid) || null;
+    const state = extra => ({
+      now: now(), user: { fio: dev.fio, login: dev.login }, open: openOffice(),
+      other: db.prepare("SELECT kind,start_ts FROM records WHERE user_id=? AND kind!='office' AND end_ts IS NULL").get(uid) || null,
+      ...extra,
+    });
+    const parseTime = (v, minMs) => {
+      const t = new Date(v);
+      if (isNaN(t) || t > new Date(Date.now() + 60000) || t < new Date(Date.now() - minMs)) fail(400, 'Неверное время');
+      return t;
+    };
+
+    switch (route) {
+      case 'GET /api/agent/state': return send(res, 200, state());
+      case 'POST /api/agent/start': {
+        const open = db.prepare('SELECT * FROM records WHERE user_id=? AND end_ts IS NULL').get(uid);
+        if (open) {
+          if (open.kind !== 'office') fail(400, `Сначала завершите ${KINDS[open.kind]} на сайте`);
+          if (open.run_id === runId) return send(res, 200, state()); // повторная отправка
+          fail(409, 'Смена уже идёт');
+        }
+        const t = b.at ? parseTime(b.at, 12 * 3600e3) : new Date(); // «at»: начало, отмеченное на ПК без связи
+        db.prepare("INSERT INTO records(user_id,date,start_ts,kind,agent,run_id,last_seen_ts) VALUES(?,?,?,'office',1,?,?)")
+          .run(uid, t.toLocaleDateString('sv'), t.toISOString(), runId, now());
+        addLog(uid, 'Начал(а) работу (на рабочем ПК)', b.at ? 'время начала сохранено на ПК при отсутствии связи' : '');
+        return send(res, 200, state());
+      }
+      case 'POST /api/agent/resume': { // компьютер включили снова, смена ещё открыта
+        const open = openOffice();
+        if (!open) fail(404, 'Нет открытой смены');
+        if (open.run_id === runId) {
+          db.prepare('UPDATE records SET last_seen_ts=? WHERE id=?').run(now(), open.id);
+          return send(res, 200, state());
+        }
+        const last = new Date(open.last_seen_ts || open.start_ts).getTime(), gap = Date.now() - last;
+        if (open.agent && gap > MAX_GAP_MS) { // слишком давно: закрываем смену по последней связи с ПК
+          db.prepare('UPDATE records SET end_ts=?, end_manual=2 WHERE id=?').run(new Date(last).toISOString(), open.id);
+          addLog(uid, 'Смена закрыта автоматически', `нет связи с ПК с ${new Date(last).toLocaleString('ru-RU')}`);
+          return send(res, 200, state({ closed: true, closedAt: new Date(last).toISOString() }));
+        }
+        const paused = open.agent && gap > PAUSE_MIN_MS ? gap : 0; // время, пока ПК был выключен, не считается
+        db.prepare('UPDATE records SET run_id=?, agent=1, last_seen_ts=?, paused_ms=paused_ms+? WHERE id=?').run(runId, now(), paused, open.id);
+        if (paused) addLog(uid, 'Продолжил(а) смену после перерыва', `пауза ${Math.round(paused / 60000)} мин (ПК был выключен)`);
+        return send(res, 200, state({ pausedMin: Math.round(paused / 60000) }));
+      }
+      case 'POST /api/agent/heartbeat': {
+        const open = openOffice();
+        if (!open) return send(res, 200, { open: false, now: now() });
+        if (open.run_id !== runId) return send(res, 200, { open: true, stale: true, now: now() });
+        db.prepare('UPDATE records SET last_seen_ts=? WHERE id=?').run(now(), open.id);
+        return send(res, 200, { open: true, now: now() });
+      }
+      case 'POST /api/agent/finish': {
+        const open = openOffice();
+        if (!open) fail(400, 'Смена не начата');
+        let end = new Date(), manual = 0;
+        if (b.end) { // «end»: окончание, отмеченное на ПК без связи
+          end = parseTime(b.end, 14 * 24 * 3600e3);
+          if (end <= new Date(open.start_ts)) fail(400, 'Время окончания должно быть позже начала');
+          manual = 1;
+        }
+        db.prepare('UPDATE records SET end_ts=?, end_manual=? WHERE id=?').run(end.toISOString(), manual, open.id);
+        addLog(uid, 'Закончил(а) работу (на рабочем ПК)', manual ? 'время окончания сохранено на ПК при отсутствии связи' : '');
+        return send(res, 200, state());
+      }
+    }
+    fail(404, 'Не найдено');
   }
 
   const user = getUser(req);
@@ -354,7 +451,7 @@ async function api(req, res, url) {
       case 'GET /api/admin/docs':
         return send(res, 200, db.prepare(`SELECT d.id,d.title,d.filename,d.size,d.created_at,u.fio FROM docs d JOIN users u ON u.id=d.user_id ORDER BY d.id DESC`).all());
       case 'GET /api/admin/users':
-        return send(res, 200, db.prepare('SELECT id,login,fio,role,active,created_at FROM users ORDER BY active DESC, fio').all());
+        return send(res, 200, db.prepare("SELECT id,login,fio,role,active,created_at,(SELECT COUNT(*) FROM sessions s WHERE s.user_id=users.id AND s.kind='pc' AND s.expires>?) AS pc FROM users ORDER BY active DESC, fio").all(Date.now()));
       case 'POST /api/admin/users': {
         const b = await readJson(req);
         const login = cleanText(b.login, 64).toLowerCase(), fio = cleanText(b.fio, 120), pw = String(b.password || '');
@@ -375,6 +472,13 @@ async function api(req, res, url) {
         });
         return res.end(file);
       }
+    }
+    if ((m = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/pc-logout$/)) && req.method === 'POST') {
+      const target = db.prepare('SELECT * FROM users WHERE id=?').get(+m[1]);
+      if (!target) fail(404, 'Сотрудник не найден');
+      db.prepare("DELETE FROM sessions WHERE user_id=? AND kind='pc'").run(target.id);
+      addLog(user.id, 'Вышел(ла) из аккаунта на рабочем ПК', target.fio);
+      return send(res, 200, { ok: true });
     }
     if ((m = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/password$/)) && req.method === 'GET') {
       const target = db.prepare('SELECT * FROM users WHERE id=?').get(+m[1]);

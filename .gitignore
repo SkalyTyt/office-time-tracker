@@ -2,3 +2,5 @@ data/
 node_modules/
 .claude/
 *.log
+client/*.exe
+client/config.ini

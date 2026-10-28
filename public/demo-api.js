@@ -3,6 +3,7 @@
 (() => {
   if (!/\.github\.io$/.test(location.hostname) && !/[?&]demo\b/.test(location.search)) return;
 
+  window.__DEMO = true;
   const KEY = 'officeTrackerDemo';
   const now = () => new Date().toISOString();
   const today = () => new Date().toLocaleDateString('sv');

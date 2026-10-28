@@ -4,13 +4,17 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const fmtTime = t => t ? new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '—';
 const fmtDT = t => t ? new Date(t).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : '—';
 const fmtDate = d => d ? d.split('-').reverse().join('.') : '';
-const hours = (a, b) => b ? ((new Date(b) - new Date(a)) / 3600000).toFixed(2) : '';
+// отработанное время = конец − начало − паузы (время, когда рабочий ПК был выключен)
+const workedMs = r => new Date(r.end_ts || Date.now()) - new Date(r.start_ts) - (r.paused_ms || 0);
+const hours = r => r.end_ts ? (workedMs(r) / 3600000).toFixed(2) : '';
+const endMark = r => (r.end_manual === 2 ? ' <span class="mark">закрыто автоматически</span>' : r.end_manual ? ' <span class="mark">указано вручную</span>' : '')
+  + (r.paused_ms > 60000 ? ` <span class="mark">пауза ${Math.round(r.paused_ms / 60000)} мин</span>` : '');
 const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' МБ' : Math.max(1, Math.round(n / 1024)) + ' КБ';
 
 const KIND_LABEL = { office: 'Офис', evening: 'Вечернее время', remote: 'Удалённо' };
 const kindPill = k => k === 'evening' ? '<span class="pill amber">вечернее</span>'
   : k === 'remote' ? '<span class="pill green">удалённо</span>' : '<span class="pill blue">офис</span>';
-const sumHours = recs => recs.reduce((t, r) => t + (new Date(r.end_ts || Date.now()) - new Date(r.start_ts)) / 3600000, 0).toFixed(2);
+const sumHours = recs => recs.reduce((t, r) => t + workedMs(r) / 3600000, 0).toFixed(2);
 
 let me = null, timerId = null;
 
@@ -109,7 +113,7 @@ function bindHeader() {
 const LONG_MS = 8 * 3600 * 1000, REASK_MS = 2 * 3600 * 1000;
 function needAsk(rec) {
   const t = Date.now();
-  if (t - new Date(rec.start_ts) < LONG_MS) return false;
+  if (t - new Date(rec.start_ts) - (rec.paused_ms || 0) < LONG_MS) return false;
   return !rec.confirmed_ts || t - new Date(rec.confirmed_ts) >= REASK_MS;
 }
 function askStillWorking(rec, kind, reload) {
@@ -191,7 +195,7 @@ async function renderWorker(into, withHeader = true) {
       `<tr><td>${esc(d.title)}</td><td><a href="/api/docs/${d.id}/file">${esc(d.filename)}</a> <span class="muted">${fmtSize(d.size)}</span></td><td>${fmtDT(d.created_at)}</td></tr>`).join('')}</table>` : '<div class="empty">Заявлений пока нет</div>'}</div>
   </div>
   <div class="card"><h2>Мои отметки</h2><div class="tablewrap">${s.history.length ? `<table><tr><th>Дата</th><th>Тип</th><th>Начало</th><th>Конец</th><th>Часов</th></tr>${s.history.map(r =>
-    `<tr><td>${fmtDate(r.date)}</td><td>${kindPill(r.kind)}</td><td>${fmtTime(r.start_ts)}</td><td>${r.end_ts ? fmtTime(r.end_ts) : `<span class="pill green">${r.kind === 'office' ? 'на месте' : 'идёт'}</span>`}${r.end_manual ? ' <span class="mark">указано вручную</span>' : ''}</td><td>${hours(r.start_ts, r.end_ts)}</td></tr>`).join('')}</table>` : '<div class="empty">Пока пусто</div>'}</div></div>`;
+    `<tr><td>${fmtDate(r.date)}</td><td>${kindPill(r.kind)}</td><td>${fmtTime(r.start_ts)}</td><td>${r.end_ts ? fmtTime(r.end_ts) : `<span class="pill green">${r.kind === 'office' ? 'на месте' : 'идёт'}</span>`}${endMark(r)}</td><td>${hours(r)}</td></tr>`).join('')}</table>` : '<div class="empty">Пока пусто</div>'}</div></div>`;
 
   clearInterval(timerId);
   const running = open ? [open, 'timer'] : eve ? [eve, 'etimer'] : null;
@@ -200,7 +204,7 @@ async function renderWorker(into, withHeader = true) {
     const [rec, id] = running;
     const tick = () => {
       onTick?.();
-      const sec = Math.max(0, Math.floor((Date.now() - new Date(rec.start_ts)) / 1000));
+      const sec = Math.max(0, Math.floor((Date.now() - new Date(rec.start_ts) - (rec.paused_ms || 0)) / 1000));
       const el = document.getElementById(id);
       if (!el) return clearInterval(timerId);
       el.textContent = [sec / 3600, sec / 60 % 60, sec % 60].map(n => String(Math.floor(n)).padStart(2, '0')).join(':');
@@ -268,14 +272,18 @@ const table = (head, rows) => rows.length
 async function tabToday(pane) {
   const { today, people } = await api('/api/admin/overview');
   const inside = people.filter(p => p.open_since).length;
+  // программа на ПК шлёт сигнал каждые 30 секунд; нет сигнала дольше 2 минут — ПК выключен или нет связи, время на паузе
+  const noSignal = p => p.open_since && p.open_agent && p.open_last_seen && Date.now() - new Date(p.open_last_seen) > 120000;
   pane.innerHTML = `<div class="card"><h2>Кто на рабочем месте — ${fmtDate(today)}</h2>
-    <p class="muted">Сейчас на месте: ${inside} из ${people.length}</p>
+    <p class="muted">Сейчас на месте: ${inside} из ${people.length}. Список обновляется сам.</p>
     ${table(['ФИО', 'Статус', 'Пришёл(ла)', 'Ушёл(ла)', 'Вечером / удалённо'], people.map(p => [
       esc(p.fio) + (p.role === 'admin' ? ' <span class="pill blue">админ</span>' : ''),
-      p.open_since ? '<span class="pill green">на месте</span>' : (p.first_start ? '<span class="pill">ушёл(ла)</span>' : '<span class="pill">не отмечался(ась)</span>'),
+      noSignal(p) ? '<span class="pill amber">на паузе: нет сигнала с ПК с ' + fmtTime(p.open_last_seen) + '</span>'
+        : p.open_since ? '<span class="pill green">на месте</span>' : (p.first_start ? '<span class="pill">ушёл(ла)</span>' : '<span class="pill">не отмечался(ась)</span>'),
       fmtTime(p.first_start), p.open_since ? '—' : fmtTime(p.last_end),
       p.evening_open ? '<span class="pill amber">идёт с ' + fmtTime(p.evening_open) + '</span>' : (p.evening ? '<span class="pill amber">было</span>' : '')
     ]))}</div>`;
+  timerId = setInterval(() => { if (adminTab === 'today' && !document.querySelector('.modal-bg')) renderAdmin(); }, 20000);
 }
 
 async function tabRecords(pane) {
@@ -289,7 +297,7 @@ async function tabRecords(pane) {
     <div><label>По дату</label><input type="date" id="ft" value="${f.to}"></div>
     <a class="btn ghost" href="/api/admin/export.xlsx?${qs()}" style="text-decoration:none">Скачать Excel</a></div>
     <div style="margin-top:12px">${table(['Сотрудник', 'Тип', 'Дата', 'Начало', 'Конец', 'Часов'], rows.map(r => [
-      esc(r.fio), kindPill(r.kind), fmtDate(r.date), fmtTime(r.start_ts), (r.end_ts ? fmtTime(r.end_ts) : '<span class="pill green">идёт</span>') + (r.end_manual ? ' <span class="mark">указано вручную</span>' : ''), hours(r.start_ts, r.end_ts)
+      esc(r.fio), kindPill(r.kind), fmtDate(r.date), fmtTime(r.start_ts), (r.end_ts ? fmtTime(r.end_ts) : '<span class="pill green">идёт</span>') + endMark(r), hours(r)
     ]))}</div></div>`;
   const upd = () => { f.user = pane.querySelector('#fu').value; f.from = pane.querySelector('#ff').value; f.to = pane.querySelector('#ft').value; renderAdmin(); };
   ['#fu', '#ff', '#ft'].forEach(s => pane.querySelector(s).onchange = upd);
@@ -297,7 +305,7 @@ async function tabRecords(pane) {
 
 async function tabEvening(pane) {
   const rows = await api('/api/admin/evening');
-  pane.innerHTML = `<div class="card"><h2>Вечернее время и удалённая работа</h2>${table(['Сотрудник', 'Тип', 'Дата', 'Начало', 'Конец', 'Часов'], rows.map(r => [esc(r.fio), kindPill(r.kind), fmtDate(r.date), fmtTime(r.start_ts), r.end_ts ? fmtTime(r.end_ts) : '<span class="pill amber">идёт</span>', hours(r.start_ts, r.end_ts)]))}</div>`;
+  pane.innerHTML = `<div class="card"><h2>Вечернее время и удалённая работа</h2>${table(['Сотрудник', 'Тип', 'Дата', 'Начало', 'Конец', 'Часов'], rows.map(r => [esc(r.fio), kindPill(r.kind), fmtDate(r.date), fmtTime(r.start_ts), r.end_ts ? fmtTime(r.end_ts) : '<span class="pill amber">идёт</span>', hours(r)]))}</div>`;
 }
 
 async function tabDocs(pane) {
@@ -330,6 +338,7 @@ async function tabUsers(pane) {
       <button class="btn ghost small" data-a="role" data-id="${u.id}" data-v="${u.role === 'admin' ? 'worker' : 'admin'}">${u.role === 'admin' ? 'Снять админа' : 'Сделать админом'}</button>
       <button class="btn ghost small" data-a="pw" data-id="${u.id}">Сбросить пароль</button>
       <button class="btn ghost small" data-a="fio" data-id="${u.id}" data-v="${esc(u.fio)}">Изменить ФИО</button>
+      ${u.pc ? `<button class="btn ghost small" data-a="pclogout" data-id="${u.id}" data-v="${esc(u.fio)}">Выйти с рабочего ПК</button>` : ''}
       <button class="btn ghost small" data-a="active" data-id="${u.id}" data-v="${u.active ? 0 : 1}">${u.active ? 'Отключить' : 'Включить'}</button></span>`
   ]))}</div>`;
   pane.querySelector('#nu').onsubmit = e => {
@@ -343,6 +352,10 @@ async function tabUsers(pane) {
       b.outerHTML = `<code>${password ? esc(password) : 'неизвестен — задайте новый'}</code>`;
       return;
     }
+    if (a === 'pclogout') {
+      if (!confirm('Выйти из аккаунта «' + v + '» на его рабочем ПК? При следующем запуске программа попросит войти заново.')) return;
+      await api(`/api/admin/users/${id}/pc-logout`, 'POST'); toast('Готово: на ПК потребуется новый вход'); renderAdmin(); return;
+    }
     let body;
     if (a === 'role') body = { role: v };
     else if (a === 'active') { if (v === '0' && !confirm('Отключить сотрудника? Он не сможет войти, история сохранится.')) return; body = { active: v === '1' }; }
@@ -353,7 +366,6 @@ async function tabUsers(pane) {
 }
 
 async function tabMe(pane) { await renderWorker(pane, false); }
-
 // ---------- старт ----------
 function render() {
   if (!me) return viewLogin();

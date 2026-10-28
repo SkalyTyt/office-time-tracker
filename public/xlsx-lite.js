@@ -70,7 +70,8 @@
   // Отчёт по отметкам: подробный лист и итоги по сотрудникам
   const LABEL = { office: 'Офис', evening: 'Вечернее время', remote: 'Удалённо' };
   function report(records) {
-    const hrs = r => r.end_ts ? Math.round((new Date(r.end_ts) - new Date(r.start_ts)) / 36000) / 100 : null;
+    // часы = конец − начало − паузы (время, когда рабочий ПК был выключен)
+    const hrs = r => r.end_ts ? Math.round((new Date(r.end_ts) - new Date(r.start_ts) - (r.paused_ms || 0)) / 36000) / 100 : null;
     const tm = t => t ? new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
     const dm = d => String(d).split('-').reverse().join('.');
     const sorted = [...records].sort((a, b) => a.fio.localeCompare(b.fio, 'ru') || a.date.localeCompare(b.date) || a.start_ts.localeCompare(b.start_ts));
@@ -80,7 +81,8 @@
     for (const r of sorted) {
       const h = hrs(r);
       detail.push([r.fio, LABEL[r.kind] || 'Офис', dm(r.date), tm(r.start_ts), tm(r.end_ts), { v: h, s: 2 },
-        r.end_ts ? (r.end_manual ? 'время окончания указано вручную' : '') : 'не завершено']);
+        [r.end_ts ? (r.end_manual === 2 ? 'закрыто автоматически (нет связи с ПК)' : r.end_manual ? 'время окончания указано вручную' : '') : 'не завершено',
+          r.paused_ms > 60000 ? 'пауза ' + Math.round(r.paused_ms / 60000) + ' мин (ПК был выключен)' : ''].filter(Boolean).join('; ')]);
       if (h !== null) {
         const s = sums.get(r.fio) || { office: 0, evening: 0, remote: 0 };
         s[LABEL[r.kind] ? r.kind : 'office'] += h; sums.set(r.fio, s);
