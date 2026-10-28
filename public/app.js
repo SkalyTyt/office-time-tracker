@@ -278,7 +278,8 @@ async function tabToday(pane) {
     <p class="muted">Сейчас на месте: ${inside} из ${people.length}. Список обновляется сам.</p>
     ${table(['ФИО', 'Статус', 'Пришёл(ла)', 'Ушёл(ла)', 'Вечером / удалённо'], people.map(p => [
       esc(p.fio) + (p.role === 'admin' ? ' <span class="pill blue">админ</span>' : ''),
-      noSignal(p) ? '<span class="pill amber">на паузе: нет сигнала с ПК с ' + fmtTime(p.open_last_seen) + '</span>'
+      p.break_since ? '<span class="pill amber">перерыв с ' + fmtTime(p.break_since) + ' (на ' + p.break_planned + ' мин)</span>'
+        : noSignal(p) ? '<span class="pill amber">на паузе: нет сигнала с ПК с ' + fmtTime(p.open_last_seen) + '</span>'
         : p.open_since ? '<span class="pill green">на месте</span>' : (p.first_start ? '<span class="pill">ушёл(ла)</span>' : '<span class="pill">не отмечался(ась)</span>'),
       fmtTime(p.first_start), p.open_since ? '—' : fmtTime(p.last_end),
       p.evening_open ? '<span class="pill amber">идёт с ' + fmtTime(p.evening_open) + '</span>' : (p.evening ? '<span class="pill amber">было</span>' : '')

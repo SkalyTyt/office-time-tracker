@@ -24,7 +24,14 @@
     const rec = (uid, daysAgo, h1, h2, kind = 'office') => {
       const s = new Date(); s.setDate(s.getDate() - daysAgo); s.setHours(h1, 0, 0, 0);
       const e = new Date(s); e.setHours(h2, 0, 0, 0);
-      d.records.push({ id: d.records.length + 1, user_id: uid, date: s.toLocaleDateString('sv'), start_ts: s.toISOString(), end_ts: e.toISOString(), kind, end_manual: 0, confirmed_ts: null });
+      const row = { id: d.records.length + 1, user_id: uid, date: s.toLocaleDateString('sv'), start_ts: s.toISOString(), end_ts: e.toISOString(), kind, end_manual: 0, confirmed_ts: null, paused_ms: 0, pauses: [] };
+      if (kind === 'office') { // в демо у каждой офисной смены обеденный перерыв
+        const a = new Date(s); a.setHours(13, 0, 0, 0);
+        const b2 = new Date(a); b2.setMinutes(30);
+        row.pauses = [{ start_ts: a.toISOString(), end_ts: b2.toISOString(), kind: 'break', planned_min: 30 }];
+        row.paused_ms = 30 * 60000;
+      }
+      d.records.push(row);
     };
     for (let i = 1; i <= 5; i++) { rec(2, i, 9, 18); rec(3, i, 8, 17); rec(4, i, 10, 19); }
     rec(2, 2, 20, 22, 'evening'); rec(3, 3, 19, 21, 'evening'); rec(4, 1, 20, 22, 'remote');
@@ -67,7 +74,7 @@
     return [...db.records].reverse().filter(r =>
       (!q.user || r.user_id === +q.user) && (!q.from || r.date >= q.from) && (!q.to || r.date <= q.to) &&
       (!q.kind || (q.kind === 'extra' ? r.kind !== 'office' : r.kind === q.kind))).slice(0, 1000)
-      .map(r => ({ id: r.id, date: r.date, start_ts: r.start_ts, end_ts: r.end_ts, kind: r.kind, end_manual: r.end_manual, fio: user(r.user_id).fio, user_id: r.user_id }));
+      .map(r => ({ id: r.id, date: r.date, start_ts: r.start_ts, end_ts: r.end_ts, kind: r.kind, end_manual: r.end_manual, paused_ms: r.paused_ms || 0, pauses: r.pauses || [], fio: user(r.user_id).fio, user_id: r.user_id }));
   }
 
   function route(method, path, q, b) {

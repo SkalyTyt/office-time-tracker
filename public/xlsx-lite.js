@@ -70,25 +70,53 @@
   // Отчёт по отметкам: подробный лист и итоги по сотрудникам
   const LABEL = { office: 'Офис', evening: 'Вечернее время', remote: 'Удалённо' };
   function report(records) {
-    // часы = конец − начало − паузы (время, когда рабочий ПК был выключен)
+    // часы = конец − начало − паузы (перерывы и время, когда рабочий ПК был выключен)
     const hrs = r => r.end_ts ? Math.round((new Date(r.end_ts) - new Date(r.start_ts) - (r.paused_ms || 0)) / 36000) / 100 : null;
     const tm = t => t ? new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
     const dm = d => String(d).split('-').reverse().join('.');
     const sorted = [...records].sort((a, b) => a.fio.localeCompare(b.fio, 'ru') || a.date.localeCompare(b.date) || a.start_ts.localeCompare(b.start_ts));
 
-    const detail = [['ФИО', 'Тип', 'Дата', 'Начало', 'Конец', 'Часов', 'Примечание']];
+    const r2 = n => Math.round(n * 100) / 100;
+    const pmin = ms => Math.round((ms || 0) / 60000);
+
+    // ----- по дням: один сотрудник за один день -----
+    const days = new Map();
+    for (const r of sorted) {
+      const key = r.fio + '|' + r.date;
+      const d = days.get(key) || { fio: r.fio, date: r.date, start: null, end: null, open: false, pauses: [], pauseMs: 0, office: 0, evening: 0, remote: 0 };
+      days.set(key, d);
+      const h = hrs(r);
+      const office = r.kind === 'office' || !LABEL[r.kind];
+      if (office) {
+        if (!d.start || r.start_ts < d.start) d.start = r.start_ts;
+        if (r.end_ts) { if (!d.end || r.end_ts > d.end) d.end = r.end_ts; } else d.open = true;
+      }
+      d.pauseMs += r.paused_ms || 0;
+      for (const p of r.pauses || []) {   // паузы вечером и удалённо подписываются типом смены
+        const tag = office ? '' : LABEL[r.kind].toLowerCase() + ': ';
+        d.pauses.push(tag + (p.end_ts
+          ? `${tm(p.start_ts)}–${tm(p.end_ts)} (${pmin(new Date(p.end_ts) - new Date(p.start_ts))} мин${p.kind === 'power' ? ', компьютер был выключен' : p.planned_min ? ', планировалось ' + p.planned_min : ''})`
+          : `с ${tm(p.start_ts)} (идёт)`));
+      }
+      if (h !== null) d[office ? 'office' : r.kind] += h;
+    }
+    const daily = [['ФИО', 'Дата', 'Начал(а)', 'Закончил(а)', 'Паузы', 'Пауза всего, мин', 'Рабочее время (офис), ч', 'Вечернее время, ч', 'Удалённо, ч', 'Итого за день, ч']];
+    for (const d of days.values()) {
+      daily.push([d.fio, dm(d.date), tm(d.start), d.open ? 'не завершено' : tm(d.end), d.pauses.join('; '), { v: pmin(d.pauseMs) },
+        { v: r2(d.office), s: 2 }, { v: r2(d.evening), s: 2 }, { v: r2(d.remote), s: 2 }, { v: r2(d.office + d.evening + d.remote), s: 3 }]);
+    }
+
+    const detail = [['ФИО', 'Тип', 'Дата', 'Начало', 'Конец', 'Пауза, мин', 'Часов', 'Примечание']];
     const sums = new Map();
     for (const r of sorted) {
       const h = hrs(r);
-      detail.push([r.fio, LABEL[r.kind] || 'Офис', dm(r.date), tm(r.start_ts), tm(r.end_ts), { v: h, s: 2 },
-        [r.end_ts ? (r.end_manual === 2 ? 'закрыто автоматически (нет связи с ПК)' : r.end_manual ? 'время окончания указано вручную' : '') : 'не завершено',
-          r.paused_ms > 60000 ? 'пауза ' + Math.round(r.paused_ms / 60000) + ' мин (ПК был выключен)' : ''].filter(Boolean).join('; ')]);
+      detail.push([r.fio, LABEL[r.kind] || 'Офис', dm(r.date), tm(r.start_ts), tm(r.end_ts), { v: pmin(r.paused_ms) }, { v: h, s: 2 },
+        r.end_ts ? (r.end_manual === 2 ? 'закрыто автоматически (нет связи с ПК)' : r.end_manual ? 'время окончания указано вручную' : '') : 'не завершено']);
       if (h !== null) {
         const s = sums.get(r.fio) || { office: 0, evening: 0, remote: 0 };
         s[LABEL[r.kind] ? r.kind : 'office'] += h; sums.set(r.fio, s);
       }
     }
-    const r2 = n => Math.round(n * 100) / 100;
     const total = [['ФИО', 'Офис, ч', 'Вечернее время, ч', 'Удалённо, ч', 'Всего, ч']];
     const grand = { office: 0, evening: 0, remote: 0 };
     for (const [fio, s] of sums) {
@@ -97,7 +125,8 @@
     }
     total.push([{ v: 'Итого', s: 4 }, { v: r2(grand.office), s: 3 }, { v: r2(grand.evening), s: 3 }, { v: r2(grand.remote), s: 3 }, { v: r2(grand.office + grand.evening + grand.remote), s: 3 }]);
     return build([
-      { name: 'Отметки', widths: [32, 18, 12, 10, 10, 9, 34], rows: detail },
+      { name: 'По дням', widths: [32, 12, 10, 12, 60, 14, 20, 16, 12, 16], rows: daily },
+      { name: 'Отметки', widths: [32, 18, 12, 10, 10, 11, 9, 34], rows: detail },
       { name: 'Итого по сотрудникам', widths: [32, 12, 20, 14, 12], rows: total },
     ]);
   }

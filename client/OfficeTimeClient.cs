@@ -25,6 +25,8 @@ namespace OfficeTime
         public string Server = "http://localhost:3000";
         public string UnlockPin = "";      // аварийный PIN администратора (Ctrl+Shift+F12 на плашке закрывает программу)
         public bool BlockKeys = true;      // блокировать Win, Alt+Tab, Ctrl+Esc, пока показана плашка
+        public bool StartServer = false;   // компьютер администратора: программа сама запускает сайт (node server.js)
+        public string ServerDir = "";      // папка с server.js (по умолчанию — папка выше программы)
 
         public static Config Load()
         {
@@ -43,6 +45,8 @@ namespace OfficeTime
                         if (k == "server") c.Server = v;
                         else if (k == "unlock_pin") c.UnlockPin = v;
                         else if (k == "block_keys") c.BlockKeys = !(v == "0" || v.ToLowerInvariant() == "no");
+                        else if (k == "start_server") c.StartServer = (v == "1" || v.ToLowerInvariant() == "yes");
+                        else if (k == "server_dir") c.ServerDir = v;
                     }
                 }
             }
@@ -213,11 +217,13 @@ namespace OfficeTime
         TextBox txtLogin, txtPass;
         Button btnMain, btnSecond;
         Timer clock = new Timer();
+        bool windowed;
         public bool AllowClose;
         public event EventHandler MainClicked, SecondClicked, PinRequested;
 
         public LockForm(bool windowed)
         {
+            this.windowed = windowed;
             Text = "Учёт времени";
             BackColor = ColorTranslator.FromHtml("#16202E");
             ForeColor = ColorTranslator.FromHtml("#E6ECF5");
@@ -301,10 +307,17 @@ namespace OfficeTime
             btnSecond.Text = second != null ? second : "";
             int bottom = (second != null ? btnSecond.Bottom : (main != null ? btnMain.Bottom : lblError.Bottom)) + 30;
             panel.Height = bottom;
-            Rectangle pb = Program.Windowed ? ClientRectangle : new Rectangle(Screen.PrimaryScreen.Bounds.X - Bounds.X, Screen.PrimaryScreen.Bounds.Y - Bounds.Y, Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height);
+            Rectangle pb = windowed ? ClientRectangle : new Rectangle(Screen.PrimaryScreen.Bounds.X - Bounds.X, Screen.PrimaryScreen.Bounds.Y - Bounds.Y, Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height);
             panel.Location = new Point(pb.X + (pb.Width - panel.Width) / 2, pb.Y + (pb.Height - panel.Height) / 2);
             if (login) { txtPass.Text = ""; txtLogin.Focus(); }
             else if (main != null) btnMain.Focus();
+        }
+
+        public void UpdateTexts(string title, string text, string main)
+        {
+            lblTitle.Text = title;
+            lblText.Text = text;
+            btnMain.Text = main;
         }
 
         public void SetBusy(bool busy)
@@ -336,7 +349,7 @@ namespace OfficeTime
     class MiniForm : Form
     {
         Label lblFio, lblTimer, lblStatus;
-        public Button BtnFinish;
+        public Button BtnFinish, BtnPause;
         public Controller Ctrl;
 
         public MiniForm(Controller ctrl)
@@ -348,7 +361,7 @@ namespace OfficeTime
             MinimizeBox = false;
             MaximizeBox = false;
             ShowInTaskbar = false;
-            TopMost = !Program.Windowed;
+            TopMost = !Program.NoBlock;
             StartPosition = FormStartPosition.Manual;
             ClientSize = new Size(330, 196);
             BackColor = ColorTranslator.FromHtml("#1F2C3F");
@@ -360,11 +373,15 @@ namespace OfficeTime
             lblFio = new Label { Location = new Point(16, 12), Size = new Size(298, 24), Font = new Font("Segoe UI Semibold", 11f), AutoEllipsis = true };
             lblTimer = new Label { Location = new Point(16, 40), Size = new Size(298, 52), Font = new Font("Segoe UI Semibold", 28f), Text = "00:00:00" };
             lblStatus = new Label { Location = new Point(16, 96), Size = new Size(298, 40), ForeColor = ColorTranslator.FromHtml("#8A9BB4") };
-            BtnFinish = new Button { Location = new Point(16, 142), Size = new Size(298, 42), Text = "Завершить смену", FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 12f), Cursor = Cursors.Hand };
+            BtnPause = new Button { Location = new Point(16, 142), Size = new Size(120, 42), Text = "Пауза", FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 12f), Cursor = Cursors.Hand };
+            BtnPause.BackColor = ColorTranslator.FromHtml("#E0A030");
+            BtnPause.ForeColor = ColorTranslator.FromHtml("#1F2C3F");
+            BtnPause.FlatAppearance.BorderSize = 0;
+            BtnFinish = new Button { Location = new Point(144, 142), Size = new Size(170, 42), Text = "Завершить смену", FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 11f), Cursor = Cursors.Hand };
             BtnFinish.BackColor = ColorTranslator.FromHtml("#D2584A");
             BtnFinish.ForeColor = Color.White;
             BtnFinish.FlatAppearance.BorderSize = 0;
-            Controls.AddRange(new Control[] { lblFio, lblTimer, lblStatus, BtnFinish });
+            Controls.AddRange(new Control[] { lblFio, lblTimer, lblStatus, BtnPause, BtnFinish });
         }
 
         public void SetFio(string fio) { lblFio.Text = fio; }
@@ -374,7 +391,7 @@ namespace OfficeTime
         // Во время смены выключить или перезагрузить компьютер нельзя
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == 0x0011 && Ctrl.ShiftActive && !Program.Windowed) // WM_QUERYENDSESSION
+            if (m.Msg == 0x0011 && Ctrl.ShiftActive && !Program.NoBlock) // WM_QUERYENDSESSION
             {
                 m.Result = IntPtr.Zero;
                 return;
@@ -402,12 +419,17 @@ namespace OfficeTime
         readonly string runId = Guid.NewGuid().ToString("N");
         string mode = "";
         string fio;
+        string role;
+        NotifyIcon tray;
         string note = "";
         bool offlineMode;
         DateTime startUtc;
         long pausedMs;
         TimeSpan serverOffset = TimeSpan.Zero;
         bool busy;
+        bool pauseActive;
+        DateTime pauseStartUtc;
+        int pausePlannedMin;
         public bool ShiftActive;
 
         static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OfficeTime"); } }
@@ -427,16 +449,18 @@ namespace OfficeTime
         public void Start()
         {
             cfg = Config.Load();
+            Program.NoBlock = Program.Windowed || cfg.StartServer;   // на ПК администратора ничего не блокируем
             api = new Api(cfg.Server);
             LoadSession();
 
-            lockForm = new LockForm(Program.Windowed);
+            lockForm = new LockForm(Program.NoBlock);
             mini = new MiniForm(this);
             IntPtr h1 = lockForm.Handle, h2 = mini.Handle; // создаём окна сразу, чтобы потоки могли к ним обращаться
             lockForm.MainClicked += OnMain;
             lockForm.SecondClicked += OnSecond;
             lockForm.PinRequested += OnPin;
             mini.BtnFinish.Click += delegate { FinishClicked(); };
+            mini.BtnPause.Click += delegate { PauseClicked(); };
 
             tick.Interval = 1000;
             tick.Tick += delegate { OnTick(); };
@@ -448,15 +472,41 @@ namespace OfficeTime
             top.Interval = 700;
             top.Tick += delegate
             {
-                if (lockForm.Visible && !Program.Windowed) { lockForm.TopMost = true; lockForm.Activate(); }
+                if (lockForm.Visible && !Program.NoBlock) { lockForm.TopMost = true; lockForm.Activate(); }
             };
             top.Start();
 
             Log("Запуск, сервер " + cfg.Server);
             ShowMode("connecting", null);
-            lockForm.Show();
-            if (cfg.BlockKeys && !Program.Windowed) keys.Install();
-            Bg(RefreshState);
+            if (!cfg.StartServer) lockForm.Show();   // на ПК администратора окно появится, только если нужен вход
+            if (cfg.BlockKeys && !Program.NoBlock) keys.Install();
+            Bg(delegate { if (cfg.StartServer) EnsureServer(); RefreshState(); });
+        }
+
+        // ПК администратора: если сайт не запущен, запускаем его сами (скрытно)
+        void EnsureServer()
+        {
+            ApiResult probe = api.Call("GET", "/api/agent/state", null);
+            if (!probe.NetError) return;   // сервер уже работает
+            try
+            {
+                string dir = cfg.ServerDir.Length > 0 ? cfg.ServerDir : Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
+                if (!File.Exists(Path.Combine(dir, "server.js"))) { Log("server.js не найден в " + dir); return; }
+                ProcessStartInfo psi = new ProcessStartInfo("node", "server.js");
+                psi.WorkingDirectory = dir;
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                try { Uri u = new Uri(cfg.Server); psi.EnvironmentVariables["PORT"] = u.Port.ToString(); } catch (Exception) { }
+                Process.Start(psi);
+                Log("Запущен сайт: node server.js в " + dir);
+                for (int i = 0; i < 20; i++)
+                {
+                    Thread.Sleep(500);
+                    if (!api.Call("GET", "/api/agent/state", null).NetError) return;
+                }
+                Log("Сайт не ответил после запуска");
+            }
+            catch (Exception ex) { Log("Не удалось запустить сайт: " + ex.Message); }
         }
 
         // --- вспомогательное ---
@@ -484,6 +534,7 @@ namespace OfficeTime
                 Dictionary<string, object> d = Api.Deserialize(Encoding.UTF8.GetString(raw)) as Dictionary<string, object>;
                 api.Token = Util.S(d, "token");
                 fio = Util.S(d, "fio");
+                role = Util.S(d, "role");
             }
             catch (Exception ex) { Log("Не удалось прочитать сохранённый вход: " + ex.Message); api.Token = null; }
         }
@@ -496,6 +547,7 @@ namespace OfficeTime
                 Dictionary<string, object> d = new Dictionary<string, object>();
                 d["token"] = api.Token;
                 d["fio"] = fio;
+                d["role"] = role;
                 byte[] enc = ProtectedData.Protect(Encoding.UTF8.GetBytes(Api.Serialize(d)), null, DataProtectionScope.CurrentUser);
                 File.WriteAllText(SessionFile, Convert.ToBase64String(enc));
             }
@@ -575,14 +627,87 @@ namespace OfficeTime
                 case "offline":
                     lockForm.Setup("Нет связи с сервером",
                         "Проверьте, что компьютер администратора включён." + (fio != null ? "\nМожно начать работу без связи: время сохранится на этом компьютере и отправится позже." : "\nПервый вход возможен только при наличии связи."),
-                        error, false, "Повторить", fio != null ? "Работать без связи" : null); break;
+                        error, false, "Повторить", (fio != null && role != "admin") ? "Работать без связи" : null); break;
                 case "other":
                     lockForm.Setup("Идёт другое время", "У вас запущено вечернее время или удалённая работа. Завершите его на сайте и нажмите «Повторить».", error, false, "Повторить", null); break;
+                case "paused":
+                    {
+                        string[] t = PauseTexts();
+                        lockForm.Setup(t[0], t[1], error, false, t[2], null);
+                        break;
+                    }
                 case "finished":
                     lockForm.Setup("Смена завершена", "Спасибо за работу! Компьютер можно выключить." + (note.Length > 0 ? "\n" + note : ""), error, false, "Выключить компьютер", "Начать новую смену"); break;
             }
+            if (m != "connecting" && !lockForm.Visible) lockForm.Show();
             lockForm.SetBusy(false);
             busy = false;
+        }
+
+        // --- администратор: та же программа, но вместо плашки открывается панель администратора ---
+        void AdminMode()
+        {
+            note = "";
+            lockForm.Hide();
+            keys.Remove();
+            EnsureTray();
+            Log("Администратор " + fio + ": открываю панель");
+            OpenAdminPanel();
+        }
+
+        void EnsureTray()
+        {
+            if (tray != null) return;
+            tray = new NotifyIcon();
+            tray.Icon = SystemIcons.Application;
+            tray.Text = "Учёт времени (администратор)";
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Items.Add("Открыть панель администратора", null, delegate { OpenAdminPanel(); });
+            menu.Items.Add("Сменить аккаунт на этом ПК", null, delegate { SwitchAccount(); });
+            menu.Items.Add("Закрыть программу", null, delegate { tray.Visible = false; lockForm.AllowClose = true; Application.Exit(); });
+            tray.ContextMenuStrip = menu;
+            tray.DoubleClick += delegate { OpenAdminPanel(); };
+            tray.Visible = true;
+        }
+
+        void SwitchAccount()
+        {
+            ClearSession();
+            fio = null;
+            role = null;
+            ShowMode("login", null);
+        }
+
+        void OpenAdminPanel()
+        {
+            Bg(delegate
+            {
+                ApiResult r = api.Call("POST", "/api/agent/ticket", new Dictionary<string, object>());
+                if (r.NetError) { Ui(delegate { MessageBox.Show("Нет связи с сервером. Проверьте, что сайт запущен.", "Учёт времени"); }); return; }
+                if (r.Status == 401) { ClearSession(); Ui(delegate { ShowMode("login", "Нужно войти заново."); }); return; }
+                string code = Util.S(r.Data, "code");
+                if (code == null) return;
+                string url = api.Base + "/api/agent/open?c=" + code;
+                Ui(delegate { LaunchBrowser(url); });
+            });
+        }
+
+        // Открываем сайт в отдельном окне Edge без адресной строки (есть на всех Windows 10/11); иначе — в браузере по умолчанию
+        void LaunchBrowser(string url)
+        {
+            try
+            {
+                if (Environment.GetEnvironmentVariable("OFFICETIME_TEST") == "1") { Log("ТЕСТ: адрес панели " + url); return; }   // только для проверки
+                string[] roots = { Environment.GetEnvironmentVariable("ProgramFiles(x86)"), Environment.GetEnvironmentVariable("ProgramFiles") };
+                foreach (string root in roots)
+                {
+                    if (string.IsNullOrEmpty(root)) continue;
+                    string edge = Path.Combine(root, @"Microsoft\Edge\Application\msedge.exe");
+                    if (File.Exists(edge)) { Process.Start(edge, "--app=\"" + url + "\""); return; }
+                }
+                Process.Start(url);
+            }
+            catch (Exception ex) { Log("Не удалось открыть панель: " + ex.Message); }
         }
 
         void OnMain(object s, EventArgs e)
@@ -593,6 +718,7 @@ namespace OfficeTime
                 case "login": DoLogin(); break;
                 case "start": DoStart(); break;
                 case "resume": DoResume(); break;
+                case "paused": EndPause(); break;
                 case "offline":
                 case "other": Retry(); break;
                 case "finished":
@@ -649,13 +775,14 @@ namespace OfficeTime
             if (r.Status != 200) { string er = r.Error; Ui(delegate { ShowMode("offline", er); }); return; }
 
             Dictionary<string, object> user = Util.D(r.Data, "user");
-            string f = Util.S(user, "fio");
+            string f = Util.S(user, "fio"), rl = Util.S(user, "role");
             Dictionary<string, object> open = Util.D(r.Data, "open");
             Dictionary<string, object> other = Util.D(r.Data, "other");
             string nowS = Util.S(r.Data, "now");
             Ui(delegate
             {
-                if (f != null) { fio = f; SaveSession(); }
+                if (f != null) { fio = f; if (rl != null) role = rl; SaveSession(); }
+                if (role == "admin") { AdminMode(); return; }   // администратору плашка и смена не нужны: открывается панель
                 if (nowS != null) serverOffset = Util.ParseIso(nowS) - DateTime.UtcNow;
                 if (other != null) { ShowMode("other", null); return; }
                 if (open != null)
@@ -685,6 +812,7 @@ namespace OfficeTime
                 if (r.Status != 200) { string er = r.Error; Ui(delegate { ShowMode("login", er); }); return; }
                 api.Token = Util.S(r.Data, "token");
                 fio = Util.S(Util.D(r.Data, "user"), "fio");
+                role = Util.S(Util.D(r.Data, "user"), "role");
                 Ui(delegate { SaveSession(); });
                 Log("Выполнен вход: " + fio);
                 RefreshState();
@@ -760,6 +888,7 @@ namespace OfficeTime
             tick.Start();
             heartbeat.Start();
             Log("Смена идёт с " + startUtc.ToLocalTime().ToString("HH:mm"));
+            if (Util.D(data, "pause") != null) BeginPause(data);   // пауза уже идёт на сервере
         }
 
         void OfflineStart()
@@ -786,7 +915,7 @@ namespace OfficeTime
 
         void BlockShutdown(bool on)
         {
-            if (Program.Windowed) return;
+            if (Program.NoBlock) return;
             try
             {
                 if (on) Native.ShutdownBlockReasonCreate(mini.Handle, "Сначала нажмите «Завершить смену»");
@@ -798,6 +927,11 @@ namespace OfficeTime
         void OnTick()
         {
             if (!ShiftActive) return;
+            if (pauseActive)
+            {   // на паузе рабочее время стоит, а на плашке идёт отсчёт паузы (и после её окончания тоже)
+                if (lockForm.Visible && mode == "paused") { string[] t = PauseTexts(); lockForm.UpdateTexts(t[0], t[1], t[2]); }
+                return;
+            }
             TimeSpan w = (DateTime.UtcNow + (offlineMode ? TimeSpan.Zero : serverOffset)) - startUtc - TimeSpan.FromMilliseconds(pausedMs);
             if (w < TimeSpan.Zero) w = TimeSpan.Zero;
             mini.SetTimer(w);
@@ -843,7 +977,7 @@ namespace OfficeTime
                         mini.Hide();
                         ShowMode("login", "Вход на этом компьютере был сброшен. Войдите снова — смена продолжится.");
                         lockForm.Show();
-                        if (cfg.BlockKeys && !Program.Windowed) keys.Install();
+                        if (cfg.BlockKeys && !Program.NoBlock) keys.Install();
                     });
                     return;
                 }
@@ -901,9 +1035,92 @@ namespace OfficeTime
             });
         }
 
+        // --- пауза: сотрудник отходит и указывает, на сколько минут ---
+        static string Fmt(TimeSpan t) { return string.Format("{0:00}:{1:00}:{2:00}", (int)t.TotalHours, t.Minutes, t.Seconds); }
+
+        string[] PauseTexts()
+        {
+            TimeSpan elapsed = DateTime.UtcNow + serverOffset - pauseStartUtc;
+            if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
+            TimeSpan planned = TimeSpan.FromMinutes(pausePlannedMin);
+            if (elapsed < planned)
+                return new string[] { "Пауза", "Осталось " + Fmt(planned - elapsed) + " из " + pausePlannedMin + " мин.\nКогда вернётесь, нажмите «Вернуться к работе».", "Вернуться к работе" };
+            return new string[] { "Время паузы закончилось", "Продолжаем работу?\nПауза идёт уже " + Fmt(elapsed) + " (сверх плана " + Fmt(elapsed - planned) + "). Это время тоже записывается как пауза.", "Продолжить работу" };
+        }
+
+        void PauseClicked()
+        {
+            if (busy || pauseActive) return;
+            if (offlineMode) { MessageBox.Show(mini, "Нет связи с сервером: пауза сейчас недоступна.", "Пауза"); return; }
+            int? minutes = Prompt.AskNumber(mini, "Пауза", "На сколько минут вы берёте паузу?", 15, 1, 720);
+            if (minutes == null) return;
+            busy = true;
+            mini.BtnPause.Enabled = false;
+            int m = minutes.Value;
+            Bg(delegate
+            {
+                Dictionary<string, object> b = new Dictionary<string, object>();
+                b["run_id"] = runId;
+                b["minutes"] = m;
+                ApiResult r = api.Call("POST", "/api/agent/pause", b);
+                if (r.Status == 200) { Ui(delegate { busy = false; mini.BtnPause.Enabled = true; BeginPause(r.Data); }); return; }
+                string er = r.NetError ? "Нет связи с сервером: пауза не записана." : r.Error;
+                Ui(delegate { busy = false; mini.BtnPause.Enabled = true; MessageBox.Show(mini, er, "Не удалось начать паузу"); });
+            });
+        }
+
+        void BeginPause(Dictionary<string, object> data)
+        {
+            Dictionary<string, object> p = Util.D(data, "pause");
+            if (p == null) return;
+            pauseStartUtc = Util.ParseIso(Util.S(p, "start_ts"));
+            pausePlannedMin = (int)Util.L(p, "planned_min");
+            string nowS = Util.S(data, "now");
+            if (nowS != null) serverOffset = Util.ParseIso(nowS) - DateTime.UtcNow;
+            pauseActive = true;
+            mini.Hide();
+            ShowMode("paused", null);
+            lockForm.Show();
+            if (cfg.BlockKeys && !Program.NoBlock) keys.Install();
+            Log("Пауза на " + pausePlannedMin + " мин");
+        }
+
+        void EndPause()
+        {
+            busy = true;
+            lockForm.SetBusy(true);
+            Bg(delegate
+            {
+                Dictionary<string, object> b = new Dictionary<string, object>();
+                b["run_id"] = runId;
+                ApiResult r = api.Call("POST", "/api/agent/pause-end", b);
+                if (r.Status == 200)
+                {
+                    Dictionary<string, object> open = Util.D(r.Data, "open");
+                    Ui(delegate
+                    {
+                        if (open != null) pausedMs = Util.L(open, "paused_ms");
+                        pauseActive = false;
+                        busy = false;
+                        lockForm.SetBusy(false);
+                        lockForm.Hide();
+                        keys.Remove();
+                        mini.SetStatus("Связь с сервером: есть");
+                        mini.Show();
+                        OnTick();
+                        Log("Возврат с паузы");
+                    });
+                    return;
+                }
+                string er = r.NetError ? "Нет связи с сервером. Нажмите ещё раз, когда связь появится." : r.Error;
+                Ui(delegate { ShowMode("paused", er); });
+            });
+        }
+
         void EndShiftLocal(string msg)
         {
             ShiftActive = false;
+            pauseActive = false;
             offlineMode = false;
             tick.Stop();
             heartbeat.Stop();
@@ -913,7 +1130,7 @@ namespace OfficeTime
             note = msg;
             ShowMode("finished", null);
             lockForm.Show();
-            if (cfg.BlockKeys && !Program.Windowed) keys.Install();
+            if (cfg.BlockKeys && !Program.NoBlock) keys.Install();
             Log("Смена завершена. " + msg);
         }
     }
@@ -921,6 +1138,31 @@ namespace OfficeTime
     // простое окно ввода PIN
     static class Prompt
     {
+        public static int? AskNumber(IWin32Window owner, string title, string text, int def, int min, int max)
+        {
+            using (Form f = new Form())
+            {
+                f.Text = title;
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.StartPosition = FormStartPosition.CenterScreen;
+                f.ClientSize = new Size(340, 150);
+                f.TopMost = true;
+                f.MinimizeBox = false;
+                f.MaximizeBox = false;
+                f.ShowInTaskbar = false;
+                f.Font = new Font("Segoe UI", 10f);
+                Label l = new Label { Text = text, Location = new Point(14, 14), Size = new Size(312, 24) };
+                NumericUpDown n = new NumericUpDown { Location = new Point(14, 46), Size = new Size(110, 30), Minimum = min, Maximum = max, Value = def, Font = new Font("Segoe UI", 13f) };
+                Label u = new Label { Text = "минут", Location = new Point(132, 50), Size = new Size(120, 24) };
+                Button ok = new Button { Text = "Начать паузу", Location = new Point(14, 96), Size = new Size(160, 38), DialogResult = DialogResult.OK };
+                Button cancel = new Button { Text = "Отмена", Location = new Point(184, 96), Size = new Size(140, 38), DialogResult = DialogResult.Cancel };
+                f.Controls.AddRange(new Control[] { l, n, u, ok, cancel });
+                f.AcceptButton = ok;
+                f.CancelButton = cancel;
+                return f.ShowDialog(owner) == DialogResult.OK ? (int?)(int)n.Value : null;
+            }
+        }
+
         public static string Ask(string title, string text)
         {
             using (Form f = new Form())
@@ -944,7 +1186,8 @@ namespace OfficeTime
 
     static class Program
     {
-        public static bool Windowed;
+        public static bool Windowed;   // --windowed: для проверки, обычное окно
+        public static bool NoBlock;    // не блокировать экран, клавиши и выключение (проверка или ПК администратора)
 
         [STAThread]
         static void Main(string[] args)
