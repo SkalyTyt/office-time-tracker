@@ -9,6 +9,9 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using Microsoft.Win32;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -662,6 +665,9 @@ namespace OfficeTime
             tray.Icon = SystemIcons.Application;
             tray.Text = "Учёт времени (администратор)";
             ContextMenuStrip menu = new ContextMenuStrip();
+            string addr = "http://" + Setup.LocalIp() + ":3000";
+            try { addr = "http://" + Setup.LocalIp() + ":" + new Uri(cfg.Server).Port; } catch (Exception) { }
+            menu.Items.Add("Адрес для других ПК: " + addr + " (скопировать)", null, delegate { try { Clipboard.SetText(addr); } catch (Exception) { } });
             menu.Items.Add("Открыть панель администратора", null, delegate { OpenAdminPanel(); });
             menu.Items.Add("Сменить аккаунт на этом ПК", null, delegate { SwitchAccount(); });
             menu.Items.Add("Закрыть программу", null, delegate { tray.Visible = false; lockForm.AllowClose = true; Application.Exit(); });
@@ -1163,6 +1169,29 @@ namespace OfficeTime
             }
         }
 
+        public static string AskText(string title, string text, string initial)
+        {
+            using (Form f = new Form())
+            {
+                f.Text = title;
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.StartPosition = FormStartPosition.CenterScreen;
+                f.ClientSize = new Size(460, 190);
+                f.TopMost = true;
+                f.MinimizeBox = false;
+                f.MaximizeBox = false;
+                f.Font = new Font("Segoe UI", 10f);
+                Label l = new Label { Text = text, Location = new Point(14, 12), Size = new Size(432, 66) };
+                TextBox t = new TextBox { Text = initial, Location = new Point(14, 88), Size = new Size(432, 28), Font = new Font("Segoe UI", 12f) };
+                Button ok = new Button { Text = "Готово", Location = new Point(14, 136), Size = new Size(140, 38), DialogResult = DialogResult.OK };
+                Button cancel = new Button { Text = "Отмена", Location = new Point(164, 136), Size = new Size(120, 38), DialogResult = DialogResult.Cancel };
+                f.Controls.AddRange(new Control[] { l, t, ok, cancel });
+                f.AcceptButton = ok;
+                f.CancelButton = cancel;
+                return f.ShowDialog() == DialogResult.OK ? t.Text : null;
+            }
+        }
+
         public static string Ask(string title, string text)
         {
             using (Form f = new Form())
@@ -1184,6 +1213,222 @@ namespace OfficeTime
         }
     }
 
+    // ---------- первая настройка: всё делается само ----------
+    static class Setup
+    {
+        const int DiscoveryPort = 41234;
+        static bool Test { get { return Environment.GetEnvironmentVariable("OFFICETIME_TEST") == "1"; } }   // при проверке не трогаем систему
+
+        public static string ConfigPath { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.ini"); } }
+        public static bool NeedsSetup() { return !File.Exists(ConfigPath); }
+
+        // false — настройку отменили или она не удалась (программа закроется)
+        public static bool Run()
+        {
+            string who = AskWho();
+            if (who == null) return false;
+            if (who == "admin") return SetupAdmin();
+            return SetupWorker();
+        }
+
+        static string AskWho()
+        {
+            using (Form f = new Form())
+            {
+                f.Text = "Учёт времени: первая настройка";
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.StartPosition = FormStartPosition.CenterScreen;
+                f.ClientSize = new Size(460, 250);
+                f.MaximizeBox = false;
+                f.MinimizeBox = false;
+                f.TopMost = true;
+                f.BackColor = ColorTranslator.FromHtml("#16202E");
+                f.ForeColor = Color.White;
+                f.Font = new Font("Segoe UI", 10f);
+                Label t = new Label { Text = "Что это за компьютер?", Location = new Point(24, 20), Size = new Size(412, 34), Font = new Font("Segoe UI Semibold", 16f) };
+                Label d = new Label { Text = "Остальное программа настроит сама.", Location = new Point(24, 58), Size = new Size(412, 22), ForeColor = ColorTranslator.FromHtml("#9FB0D9") };
+                Button a = new Button { Text = "Компьютер администратора", Location = new Point(24, 96), Size = new Size(412, 56), DialogResult = DialogResult.Yes, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 12f), BackColor = ColorTranslator.FromHtml("#3B6FD4") };
+                Button w = new Button { Text = "Компьютер сотрудника", Location = new Point(24, 164), Size = new Size(412, 56), DialogResult = DialogResult.No, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 12f), BackColor = ColorTranslator.FromHtml("#2F4059") };
+                a.FlatAppearance.BorderSize = 0;
+                w.FlatAppearance.BorderSize = 0;
+                f.Controls.AddRange(new Control[] { t, d, a, w });
+                DialogResult r = f.ShowDialog();
+                if (r == DialogResult.Yes) return "admin";
+                if (r == DialogResult.No) return "worker";
+                return null;
+            }
+        }
+
+        // ПК администратора: сайт запускается этой программой, порт открывается в брандмауэре, автозапуск при входе в Windows
+        static bool SetupAdmin()
+        {
+            string nodeErr = CheckNode();
+            if (nodeErr != null) { MessageBox.Show(nodeErr, "Учёт времени", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
+            WriteConfig("http://localhost:3000", true);
+            bool fw = OpenFirewall(3000);
+            AddAutostart();
+            string ip = LocalIp();
+            MessageBox.Show(
+                "Компьютер администратора настроен.\n\n• сайт будет запускаться сам при входе в Windows;\n• автозапуск программы включён;\n" +
+                (fw ? "• доступ для других компьютеров открыт.\n" : "• ВНИМАНИЕ: доступ в брандмауэре открыть не удалось (нужно было разрешить запрос Windows). Без него другие компьютеры не подключатся — запустите программу ещё раз после удаления файла config.ini.\n") +
+                "\nКомпьютеры сотрудников найдут сервер сами. Если не найдут, адрес такой:\nhttp://" + ip + ":3000",
+                "Учёт времени", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return true;
+        }
+
+        static bool SetupWorker()
+        {
+            string url = Discover();
+            if (url != null) MessageBox.Show("Сервер найден автоматически:\n" + url, "Учёт времени", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else
+            {
+                url = Prompt.AskText("Адрес сервера", "Сервер не найден автоматически. Проверьте, что компьютер администратора включён, или введите адрес, который показывает программа на нём:", "http://");
+                if (url == null || url.Trim().Length < 8) return false;
+                url = url.Trim();
+                if (!url.StartsWith("http")) url = "http://" + url;
+            }
+            WriteConfig(url, false);
+            AddAutostart();
+            return true;
+        }
+
+        static void WriteConfig(string server, bool admin)
+        {
+            string text = "server=" + server + "\r\n" + (admin ? "start_server=1\r\n" : "") + "# unlock_pin=1234\r\n# block_keys=0\r\n";
+            File.WriteAllText(ConfigPath, text, new UTF8Encoding(false));
+        }
+
+        static string CheckNode()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo("node", "--version");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                using (Process p = Process.Start(psi))
+                {
+                    string v = p.StandardOutput.ReadToEnd().Trim();
+                    p.WaitForExit(5000);
+                    int major;
+                    if (v.StartsWith("v") && int.TryParse(v.Substring(1).Split('.')[0], out major))
+                        return major >= 22 ? null : "Установлен Node.js " + v + ", а нужен версии 22 или новее. Скачайте с nodejs.org и запустите программу снова.";
+                }
+            }
+            catch (Exception) { }
+            return "Не найден Node.js (на нём работает сайт). Установите его с nodejs.org (версия 22 или новее) и запустите программу снова.";
+        }
+
+        // Открываем порты в брандмауэре Windows: для этого программа сама запускает свою копию с запросом прав администратора
+        static bool OpenFirewall(int port)
+        {
+            if (Test) { Controller.Log("ТЕСТ: открытие брандмауэра пропущено"); return true; }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath, "--firewall " + port);
+                psi.Verb = "runas";
+                psi.UseShellExecute = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                using (Process p = Process.Start(psi))
+                {
+                    p.WaitForExit(30000);
+                    return p.HasExited && p.ExitCode == 0;
+                }
+            }
+            catch (Exception ex) { Controller.Log("Брандмауэр: " + ex.Message); return false; }   // запрос Windows отклонён
+        }
+
+        // Режим «--firewall <порт>» (запускается с правами администратора): правила для сайта и автопоиска
+        public static int FirewallHelper(int port)
+        {
+            Netsh("advfirewall firewall delete rule name=\"OfficeTime\"");
+            int a = Netsh("advfirewall firewall add rule name=\"OfficeTime\" dir=in action=allow protocol=TCP localport=" + port + " profile=any");
+            int b = Netsh("advfirewall firewall add rule name=\"OfficeTime discovery\" dir=in action=allow protocol=UDP localport=" + DiscoveryPort + " profile=any");
+            return (a == 0 && b == 0) ? 0 : 1;
+        }
+
+        static int Netsh(string args)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo("netsh", args);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                using (Process p = Process.Start(psi)) { p.WaitForExit(15000); return p.ExitCode; }
+            }
+            catch (Exception) { return 1; }
+        }
+
+        static void AddAutostart()
+        {
+            if (Test) { Controller.Log("ТЕСТ: автозапуск пропущен"); return; }
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                    k.SetValue("OfficeTimeClient", "\"" + Application.ExecutablePath + "\"");
+            }
+            catch (Exception ex) { Controller.Log("Автозапуск: " + ex.Message); }
+        }
+
+        public static string LocalIp()
+        {
+            try
+            {
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    IPInterfaceProperties ip = ni.GetIPProperties();
+                    if (ip.GatewayAddresses.Count == 0) continue;
+                    foreach (UnicastIPAddressInformation ua in ip.UnicastAddresses)
+                        if (ua.Address.AddressFamily == AddressFamily.InterNetwork) return ua.Address.ToString();
+                }
+            }
+            catch (Exception) { }
+            return "адрес-этого-компьютера";
+        }
+
+        // Ищем сервер в локальной сети: широковещательный запрос, ответ приходит с адресом и портом сервера
+        public static string Discover()
+        {
+            try
+            {
+                List<IPAddress> targets = new List<IPAddress>();
+                targets.Add(IPAddress.Broadcast);
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    foreach (UnicastIPAddressInformation ua in ni.GetIPProperties().UnicastAddresses)
+                    {
+                        if (ua.Address.AddressFamily != AddressFamily.InterNetwork || ua.IPv4Mask == null) continue;
+                        byte[] ip = ua.Address.GetAddressBytes(), m = ua.IPv4Mask.GetAddressBytes(), bc = new byte[4];
+                        for (int i = 0; i < 4; i++) bc[i] = (byte)(ip[i] | ~m[i]);
+                        targets.Add(new IPAddress(bc));
+                    }
+                }
+                using (UdpClient c = new UdpClient())
+                {
+                    c.EnableBroadcast = true;
+                    c.Client.ReceiveTimeout = 1000;
+                    byte[] msg = Encoding.ASCII.GetBytes("OFFICETIME?");
+                    for (int attempt = 0; attempt < 3; attempt++)
+                    {
+                        foreach (IPAddress t in targets) { try { c.Send(msg, msg.Length, new IPEndPoint(t, DiscoveryPort)); } catch (Exception) { } }
+                        try
+                        {
+                            IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                            string s = Encoding.ASCII.GetString(c.Receive(ref from));
+                            int port;
+                            if (s.StartsWith("OFFICETIME ") && int.TryParse(s.Substring(11).Trim(), out port)) return "http://" + from.Address + ":" + port;
+                        }
+                        catch (SocketException) { }
+                    }
+                }
+            }
+            catch (Exception ex) { Controller.Log("Автопоиск: " + ex.Message); }
+            return null;
+        }
+    }
+
     static class Program
     {
         public static bool Windowed;   // --windowed: для проверки, обычное окно
@@ -1192,6 +1437,18 @@ namespace OfficeTime
         [STAThread]
         static void Main(string[] args)
         {
+            if (args.Length >= 2 && args[0] == "--firewall")   // вспомогательный запуск с правами администратора
+            {
+                int port;
+                Environment.Exit(int.TryParse(args[1], out port) ? Setup.FirewallHelper(port) : 1);
+                return;
+            }
+            if (args.Length >= 1 && args[0] == "--discover")   // проверка автопоиска сервера
+            {
+                string found = Setup.Discover();
+                Controller.Log("Автопоиск: " + (found != null ? found : "сервер не найден"));
+                return;
+            }
             Windowed = Array.IndexOf(args, "--windowed") >= 0;   // для проверки: обычное окно без блокировок
             bool created;
             Mutex mutex = new Mutex(true, "OfficeTimeClient_" + Environment.UserName, out created);
@@ -1199,6 +1456,7 @@ namespace OfficeTime
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += delegate (object s, ThreadExceptionEventArgs e) { Controller.Log("UI: " + e.Exception); };
+            if (Setup.NeedsSetup() && !Setup.Run()) return;   // при первом запуске программа спрашивает, что это за ПК, и настраивает всё сама
             new Controller().Start();
             Application.Run();
             GC.KeepAlive(mutex);

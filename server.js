@@ -612,6 +612,21 @@ function serveStatic(req, res, url) {
   fs.createReadStream(file).pipe(res);
 }
 
+// Автопоиск сервера в локальной сети: программа на ПК сотрудника шлёт широковещательное «OFFICETIME?»,
+// сервер отвечает своим портом, и вводить адрес вручную не нужно
+function startDiscovery() {
+  if (process.env.DISCOVERY === '0') return;
+  try {
+    const sock = require('node:dgram').createSocket({ type: 'udp4', reuseAddr: true });
+    sock.on('message', (msg, rinfo) => {
+      if (String(msg).startsWith('OFFICETIME?')) sock.send(Buffer.from('OFFICETIME ' + PORT), rinfo.port, rinfo.address);
+    });
+    sock.on('error', e => console.error('Автопоиск сервера отключён:', e.message));
+    sock.bind(41234);
+  } catch (e) { console.error('Автопоиск сервера отключён:', e.message); }
+}
+startDiscovery();
+
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
