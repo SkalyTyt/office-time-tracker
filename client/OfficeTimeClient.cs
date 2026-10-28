@@ -212,203 +212,6 @@ namespace OfficeTime
         }
     }
 
-    // ---------- плашка на весь экран ----------
-    class LockForm : Form
-    {
-        Panel panel;
-        Label lblClock, lblTitle, lblText, lblLoginCap, lblPassCap, lblError;
-        TextBox txtLogin, txtPass;
-        Button btnMain, btnSecond;
-        Timer clock = new Timer();
-        bool windowed;
-        public bool AllowClose;
-        public event EventHandler MainClicked, SecondClicked, PinRequested;
-
-        public LockForm(bool windowed)
-        {
-            this.windowed = windowed;
-            Text = "Учёт времени";
-            BackColor = ColorTranslator.FromHtml("#16202E");
-            ForeColor = ColorTranslator.FromHtml("#E6ECF5");
-            Font = new Font("Segoe UI", 10f);
-            KeyPreview = true;
-            if (windowed)
-            {
-                FormBorderStyle = FormBorderStyle.FixedSingle;
-                MaximizeBox = false;
-                ClientSize = new Size(1000, 700);
-                StartPosition = FormStartPosition.CenterScreen;
-            }
-            else
-            {
-                FormBorderStyle = FormBorderStyle.None;
-                ShowInTaskbar = false;
-                TopMost = true;
-                StartPosition = FormStartPosition.Manual;
-                Bounds = SystemInformation.VirtualScreen;
-            }
-
-            lblClock = new Label { AutoSize = false, Location = new Point(48, 32), Size = new Size(900, 70), Font = new Font("Segoe UI Light", 36f), ForeColor = ColorTranslator.FromHtml("#8FB3F0") };
-            Controls.Add(lblClock);
-
-            panel = new Panel { Size = new Size(620, 520), BackColor = ColorTranslator.FromHtml("#1F2C3F") };
-            Controls.Add(panel);
-            lblTitle = new Label { Location = new Point(30, 26), Size = new Size(560, 50), Font = new Font("Segoe UI Semibold", 22f), ForeColor = Color.White };
-            lblText = new Label { Location = new Point(30, 86), Size = new Size(560, 84), Font = new Font("Segoe UI", 12.5f), ForeColor = ColorTranslator.FromHtml("#B9C6DA") };
-            lblLoginCap = Caption("Логин", 176);
-            txtLogin = Input(198, false);
-            lblPassCap = Caption("Пароль", 242);
-            txtPass = Input(264, true);
-            lblError = new Label { Location = new Point(30, 318), Size = new Size(560, 44), Font = new Font("Segoe UI", 10.5f), ForeColor = ColorTranslator.FromHtml("#FF8A7A") };
-            btnMain = Btn(372, 60, 16f, "#3B6FD4", "#FFFFFF");
-            btnSecond = Btn(442, 46, 12f, "#2F4059", "#E6ECF5");
-            btnMain.Click += delegate (object s, EventArgs e) { if (MainClicked != null) MainClicked(this, e); };
-            btnSecond.Click += delegate (object s, EventArgs e) { if (SecondClicked != null) SecondClicked(this, e); };
-            panel.Controls.AddRange(new Control[] { lblTitle, lblText, lblLoginCap, txtLogin, lblPassCap, txtPass, lblError, btnMain, btnSecond });
-            AcceptButton = btnMain;
-
-            clock.Interval = 1000;
-            clock.Tick += delegate { lblClock.Text = DateTime.Now.ToString("HH:mm") + "   " + DateTime.Now.ToString("d MMMM", new CultureInfo("ru-RU")); };
-            clock.Start();
-            lblClock.Text = DateTime.Now.ToString("HH:mm");
-        }
-
-        Label Caption(string t, int y) { Label l = new Label { Text = t, Location = new Point(30, y), Size = new Size(300, 22), ForeColor = ColorTranslator.FromHtml("#8A9BB4") }; return l; }
-
-        TextBox Input(int y, bool pass)
-        {
-            TextBox t = new TextBox { Location = new Point(30, y), Size = new Size(560, 34), Font = new Font("Segoe UI", 13f), BackColor = ColorTranslator.FromHtml("#16202E"), ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
-            t.UseSystemPasswordChar = pass;
-            return t;
-        }
-
-        Button Btn(int y, int h, float size, string back, string fore)
-        {
-            Button b = new Button { Location = new Point(30, y), Size = new Size(560, h), Font = new Font("Segoe UI Semibold", size), FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
-            b.BackColor = ColorTranslator.FromHtml(back);
-            b.ForeColor = ColorTranslator.FromHtml(fore);
-            b.FlatAppearance.BorderSize = 0;
-            return b;
-        }
-
-        public string LoginText { get { return txtLogin.Text.Trim(); } }
-        public string PassText { get { return txtPass.Text; } }
-
-        public void Setup(string title, string text, string error, bool login, string main, string second)
-        {
-            lblTitle.Text = title;
-            lblText.Text = text;
-            lblError.Text = error != null ? error : "";
-            lblLoginCap.Visible = txtLogin.Visible = lblPassCap.Visible = txtPass.Visible = login;
-            int dy = login ? 0 : -130;
-            lblError.Top = 318 + dy;
-            btnMain.Top = 372 + dy;
-            btnSecond.Top = 442 + dy;
-            btnMain.Visible = main != null;
-            btnMain.Text = main != null ? main : "";
-            btnSecond.Visible = second != null;
-            btnSecond.Text = second != null ? second : "";
-            int bottom = (second != null ? btnSecond.Bottom : (main != null ? btnMain.Bottom : lblError.Bottom)) + 30;
-            panel.Height = bottom;
-            Rectangle pb = windowed ? ClientRectangle : new Rectangle(Screen.PrimaryScreen.Bounds.X - Bounds.X, Screen.PrimaryScreen.Bounds.Y - Bounds.Y, Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height);
-            panel.Location = new Point(pb.X + (pb.Width - panel.Width) / 2, pb.Y + (pb.Height - panel.Height) / 2);
-            if (login) { txtPass.Text = ""; txtLogin.Focus(); }
-            else if (main != null) btnMain.Focus();
-        }
-
-        public void UpdateTexts(string title, string text, string main)
-        {
-            lblTitle.Text = title;
-            lblText.Text = text;
-            btnMain.Text = main;
-        }
-
-        public void SetBusy(bool busy)
-        {
-            btnMain.Enabled = !busy;
-            btnSecond.Enabled = !busy;
-            txtLogin.Enabled = !busy;
-            txtPass.Enabled = !busy;
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            if (!AllowClose) e.Cancel = true;
-            base.OnFormClosing(e);
-        }
-
-        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-        {
-            if (keyData == (Keys.Control | Keys.Shift | Keys.F12))
-            {
-                if (PinRequested != null) PinRequested(this, EventArgs.Empty);
-                return true;
-            }
-            return base.ProcessCmdKey(ref msg, keyData);
-        }
-    }
-
-    // ---------- маленькое окно во время смены ----------
-    class MiniForm : Form
-    {
-        Label lblFio, lblTimer, lblStatus;
-        public Button BtnFinish, BtnPause;
-        public Controller Ctrl;
-
-        public MiniForm(Controller ctrl)
-        {
-            Ctrl = ctrl;
-            Text = "Учёт времени";
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            ControlBox = false;
-            MinimizeBox = false;
-            MaximizeBox = false;
-            ShowInTaskbar = false;
-            TopMost = !Program.NoBlock;
-            StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(330, 196);
-            BackColor = ColorTranslator.FromHtml("#1F2C3F");
-            ForeColor = Color.White;
-            Font = new Font("Segoe UI", 9.5f);
-            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(wa.Right - Width - 16, wa.Bottom - Height - 16);
-
-            lblFio = new Label { Location = new Point(16, 12), Size = new Size(298, 24), Font = new Font("Segoe UI Semibold", 11f), AutoEllipsis = true };
-            lblTimer = new Label { Location = new Point(16, 40), Size = new Size(298, 52), Font = new Font("Segoe UI Semibold", 28f), Text = "00:00:00" };
-            lblStatus = new Label { Location = new Point(16, 96), Size = new Size(298, 40), ForeColor = ColorTranslator.FromHtml("#8A9BB4") };
-            BtnPause = new Button { Location = new Point(16, 142), Size = new Size(120, 42), Text = "Пауза", FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 12f), Cursor = Cursors.Hand };
-            BtnPause.BackColor = ColorTranslator.FromHtml("#E0A030");
-            BtnPause.ForeColor = ColorTranslator.FromHtml("#1F2C3F");
-            BtnPause.FlatAppearance.BorderSize = 0;
-            BtnFinish = new Button { Location = new Point(144, 142), Size = new Size(170, 42), Text = "Завершить смену", FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 11f), Cursor = Cursors.Hand };
-            BtnFinish.BackColor = ColorTranslator.FromHtml("#D2584A");
-            BtnFinish.ForeColor = Color.White;
-            BtnFinish.FlatAppearance.BorderSize = 0;
-            Controls.AddRange(new Control[] { lblFio, lblTimer, lblStatus, BtnPause, BtnFinish });
-        }
-
-        public void SetFio(string fio) { lblFio.Text = fio; }
-        public void SetTimer(TimeSpan t) { lblTimer.Text = string.Format("{0:00}:{1:00}:{2:00}", (int)t.TotalHours, t.Minutes, t.Seconds); }
-        public void SetStatus(string s) { lblStatus.Text = s; }
-
-        // Во время смены выключить или перезагрузить компьютер нельзя
-        protected override void WndProc(ref Message m)
-        {
-            if (m.Msg == 0x0011 && Ctrl.ShiftActive && !Program.NoBlock) // WM_QUERYENDSESSION
-            {
-                m.Result = IntPtr.Zero;
-                return;
-            }
-            base.WndProc(ref m);
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            if (e.CloseReason == CloseReason.UserClosing || e.CloseReason == CloseReason.TaskManagerClosing) e.Cancel = true;
-            base.OnFormClosing(e);
-        }
-    }
-
     // ---------- вся логика ----------
     class Controller
     {
@@ -430,6 +233,7 @@ namespace OfficeTime
         long pausedMs;
         TimeSpan serverOffset = TimeSpan.Zero;
         bool busy;
+        string shiftKind = "office";
         bool pauseActive;
         DateTime pauseStartUtc;
         int pausePlannedMin;
@@ -592,6 +396,7 @@ namespace OfficeTime
                 Dictionary<string, object> b = new Dictionary<string, object>();
                 b["run_id"] = runId;
                 b["at"] = p["start"];
+                if (p.ContainsKey("kind")) b["kind"] = p["kind"];
                 ApiResult r = api.Call("POST", "/api/agent/start", b);
                 if (r.NetError) return false;
                 if (r.Status == 401) return true;
@@ -624,13 +429,17 @@ namespace OfficeTime
                 case "login":
                     lockForm.Setup("Вход", "Войдите один раз: программа запомнит вас на этом компьютере и больше не будет спрашивать пароль.", error, true, "Войти", null); break;
                 case "start":
-                    lockForm.Setup("Здравствуйте, " + name + "!", (note.Length > 0 ? note + "\n" : "") + "Чтобы продолжить работу, нажмите «Начать смену».", error, false, "Начать смену", null); break;
+                    lockForm.Setup("Здравствуйте, " + name + "!", (note.Length > 0 ? note + "\n" : "") + "Выберите, чем вы занимаетесь, и нажмите «Начать смену».", error, false, "Начать смену", null, true); break;
                 case "resume":
-                    lockForm.Setup("С возвращением, " + name + "!", "Ваша смена идёт с " + startUtc.ToLocalTime().ToString("HH:mm") + ". Нажмите «Продолжить смену», чтобы вернуться к работе.", error, false, "Продолжить смену", null); break;
+                    lockForm.Setup("С возвращением, " + name + "!", "Ваша смена («" + Theme.KindName(shiftKind) + "») идёт с " + startUtc.ToLocalTime().ToString("HH:mm") + ". Нажмите «Продолжить смену», чтобы вернуться к работе.", error, false, "Продолжить смену", null); break;
                 case "offline":
-                    lockForm.Setup("Нет связи с сервером",
-                        "Проверьте, что компьютер администратора включён." + (fio != null ? "\nМожно начать работу без связи: время сохранится на этом компьютере и отправится позже." : "\nПервый вход возможен только при наличии связи."),
-                        error, false, "Повторить", (fio != null && role != "admin") ? "Работать без связи" : null); break;
+                    {
+                        bool canOffline = fio != null && role != "admin";
+                        lockForm.Setup("Нет связи с сервером",
+                            "Проверьте, что компьютер администратора включён." + (canOffline ? "\nМожно начать работу без связи: выберите тип, время сохранится на этом компьютере и отправится позже." : "\nПервый вход возможен только при наличии связи."),
+                            error, false, "Повторить", canOffline ? "Работать без связи" : null, canOffline);
+                        break;
+                    }
                 case "other":
                     lockForm.Setup("Идёт другое время", "У вас запущено вечернее время или удалённая работа. Завершите его на сайте и нажмите «Повторить».", error, false, "Повторить", null); break;
                 case "paused":
@@ -795,6 +604,7 @@ namespace OfficeTime
                 {
                     startUtc = Util.ParseIso(Util.S(open, "start_ts"));
                     pausedMs = Util.L(open, "paused_ms");
+                    shiftKind = Util.S(open, "kind") ?? "office";
                     if (ShiftActive) { ShowMode("resume", null); return; }   // вход был сброшен во время смены
                     ShowMode("resume", null);
                 }
@@ -827,12 +637,14 @@ namespace OfficeTime
 
         void DoStart()
         {
+            string kindChoice = lockForm.SelectedKind;   // «Офис», «Вечернее время» или «Удалённо»
             busy = true;
             lockForm.SetBusy(true);
             Bg(delegate
             {
                 Dictionary<string, object> b = new Dictionary<string, object>();
                 b["run_id"] = runId;
+                b["kind"] = kindChoice;
                 ApiResult r = api.Call("POST", "/api/agent/start", b);
                 HandleShiftResult(r, "start");
             });
@@ -877,6 +689,8 @@ namespace OfficeTime
             if (open == null) { ShowMode("start", null); return; }
             startUtc = Util.ParseIso(Util.S(open, "start_ts"));
             pausedMs = Util.L(open, "paused_ms");
+            shiftKind = Util.S(open, "kind") ?? "office";
+            mini.SetKind(shiftKind);
             string nowS = Util.S(data, "now");
             if (nowS != null) serverOffset = Util.ParseIso(nowS) - DateTime.UtcNow;
             long pausedMin = Util.L(data, "pausedMin");
@@ -901,7 +715,10 @@ namespace OfficeTime
         {
             Dictionary<string, object> p = LoadPending();
             p["start"] = Util.Iso(DateTime.UtcNow);
+            p["kind"] = lockForm.SelectedKind;
             SavePending(p);
+            shiftKind = lockForm.SelectedKind;
+            mini.SetKind(shiftKind);
             startUtc = DateTime.UtcNow;
             pausedMs = 0;
             offlineMode = true;
@@ -999,7 +816,7 @@ namespace OfficeTime
         void FinishClicked()
         {
             if (busy) return;
-            if (MessageBox.Show(mini, "Завершить смену? Время окончания будет сохранено.", "Завершение смены", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            if (!Prompt.Confirm(mini, "Завершение смены", "Завершить смену? Время окончания будет сохранено.")) return;
             busy = true;
             mini.BtnFinish.Enabled = false;
             bool wasOffline = offlineMode;
@@ -1144,25 +961,55 @@ namespace OfficeTime
     // простое окно ввода PIN
     static class Prompt
     {
+        // Окно в общем стиле: тёмная карточка со скруглёнными кнопками
+        static Form Styled(string title, int w, int h)
+        {
+            Form f = new Form();
+            f.Text = title;
+            f.FormBorderStyle = FormBorderStyle.None;
+            f.StartPosition = FormStartPosition.CenterScreen;
+            f.ClientSize = new Size(w, h);
+            f.TopMost = true;
+            f.ShowInTaskbar = false;
+            f.BackColor = Theme.H("#121A44");
+            f.ForeColor = Color.White;
+            f.Font = new Font("Segoe UI", 10.5f);
+            f.Region = new Region(Theme.Round(new RectangleF(0, 0, w, h), 22));
+            f.Paint += delegate (object s, PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (System.Drawing.Drawing2D.GraphicsPath p = Theme.Round(new RectangleF(0.5f, 0.5f, w - 2, h - 2), 22))
+                using (Pen pen = new Pen(Color.FromArgb(80, 255, 255, 255), 1.2f)) e.Graphics.DrawPath(pen, p);
+            };
+            return f;
+        }
+
+        public static bool Confirm(IWin32Window owner, string title, string text)
+        {
+            using (Form f = Styled(title, 420, 190))
+            {
+                Label t = new Label { Text = title, Location = new Point(26, 22), Size = new Size(368, 30), Font = new Font("Segoe UI Semibold", 15f), BackColor = Color.Transparent };
+                Label d = new Label { Text = text, Location = new Point(26, 62), Size = new Size(368, 48), ForeColor = Theme.Muted, BackColor = Color.Transparent };
+                RoundButton yes = new RoundButton { Text = "Да", Location = new Point(26, 126), Size = new Size(176, 44), DialogResult = DialogResult.Yes, From = Theme.Red1, To = Theme.Red2 };
+                RoundButton no = new RoundButton { Text = "Нет", Location = new Point(214, 126), Size = new Size(180, 44), DialogResult = DialogResult.No, Ghost = true };
+                f.Controls.AddRange(new Control[] { t, d, yes, no });
+                f.AcceptButton = yes;
+                f.CancelButton = no;
+                return f.ShowDialog(owner) == DialogResult.Yes;
+            }
+        }
+
         public static int? AskNumber(IWin32Window owner, string title, string text, int def, int min, int max)
         {
-            using (Form f = new Form())
+            using (Form f = Styled(title, 420, 230))
             {
-                f.Text = title;
-                f.FormBorderStyle = FormBorderStyle.FixedDialog;
-                f.StartPosition = FormStartPosition.CenterScreen;
-                f.ClientSize = new Size(340, 150);
-                f.TopMost = true;
-                f.MinimizeBox = false;
-                f.MaximizeBox = false;
-                f.ShowInTaskbar = false;
-                f.Font = new Font("Segoe UI", 10f);
-                Label l = new Label { Text = text, Location = new Point(14, 14), Size = new Size(312, 24) };
-                NumericUpDown n = new NumericUpDown { Location = new Point(14, 46), Size = new Size(110, 30), Minimum = min, Maximum = max, Value = def, Font = new Font("Segoe UI", 13f) };
-                Label u = new Label { Text = "минут", Location = new Point(132, 50), Size = new Size(120, 24) };
-                Button ok = new Button { Text = "Начать паузу", Location = new Point(14, 96), Size = new Size(160, 38), DialogResult = DialogResult.OK };
-                Button cancel = new Button { Text = "Отмена", Location = new Point(184, 96), Size = new Size(140, 38), DialogResult = DialogResult.Cancel };
-                f.Controls.AddRange(new Control[] { l, n, u, ok, cancel });
+                Label t = new Label { Text = title, Location = new Point(26, 22), Size = new Size(368, 30), Font = new Font("Segoe UI Semibold", 15f), BackColor = Color.Transparent };
+                Label d = new Label { Text = text, Location = new Point(26, 60), Size = new Size(368, 26), ForeColor = Theme.Muted, BackColor = Color.Transparent };
+                NumericUpDown n = new NumericUpDown { Location = new Point(26, 96), Size = new Size(120, 36), Minimum = min, Maximum = max, Value = def, Font = new Font("Segoe UI", 16f), BackColor = Theme.Field, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+                Label u = new Label { Text = "минут", Location = new Point(156, 104), Size = new Size(120, 26), ForeColor = Theme.Muted, BackColor = Color.Transparent, Font = new Font("Segoe UI", 12f) };
+                RoundButton ok = new RoundButton { Text = "Начать паузу", Location = new Point(26, 160), Size = new Size(200, 48), DialogResult = DialogResult.OK, From = Theme.Amber1, To = Theme.Amber2, Fore = Theme.H("#2A1B00") };
+                RoundButton cancel = new RoundButton { Text = "Отмена", Location = new Point(238, 160), Size = new Size(156, 48), DialogResult = DialogResult.Cancel, Ghost = true };
+                f.Controls.AddRange(new Control[] { t, d, n, u, ok, cancel });
                 f.AcceptButton = ok;
                 f.CancelButton = cancel;
                 return f.ShowDialog(owner) == DialogResult.OK ? (int?)(int)n.Value : null;
