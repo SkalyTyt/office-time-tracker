@@ -7,7 +7,9 @@ const fmtDate = d => d ? d.split('-').reverse().join('.') : '';
 const hours = (a, b) => b ? ((new Date(b) - new Date(a)) / 3600000).toFixed(2) : '';
 const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' МБ' : Math.max(1, Math.round(n / 1024)) + ' КБ';
 
-const kindPill = k => k === 'evening' ? '<span class="pill amber">вечернее</span>' : '<span class="pill blue">офис</span>';
+const KIND_LABEL = { office: 'Офис', evening: 'Вечернее время', remote: 'Удалённо' };
+const kindPill = k => k === 'evening' ? '<span class="pill amber">вечернее</span>'
+  : k === 'remote' ? '<span class="pill green">удалённо</span>' : '<span class="pill blue">офис</span>';
 const sumHours = recs => recs.reduce((t, r) => t + (new Date(r.end_ts || Date.now()) - new Date(r.start_ts)) / 3600000, 0).toFixed(2);
 
 let me = null, timerId = null;
@@ -161,16 +163,20 @@ async function renderWorker(into, withHeader = true) {
     <button class="btn big stop" id="finish" ${open ? '' : 'disabled'}>Закончил(а) работу</button>
   </div>
   <div class="card evening">
-    <h2>Вечернее время</h2>
-    <p class="muted">Работаете дома или после основного дня? Запустите отдельный таймер — он учитывается как вечернее время.</p>
+    <h2>Вечернее время / удалённо</h2>
+    <p class="muted">Работаете вечером или удалённо? Выберите тип и запустите отдельный таймер.</p>
+    <select id="ekind" ${eve || open ? 'disabled' : ''} aria-label="Тип">
+      <option value="evening" ${eve?.kind === 'evening' ? 'selected' : ''}>Вечернее время</option>
+      <option value="remote" ${eve?.kind === 'remote' ? 'selected' : ''}>Удалённо</option>
+    </select>
     <div class="status" style="padding:10px 0">
-      <span class="badge ${eve ? 'on' : ''}">${eve ? 'Вечернее время идёт с ' + fmtTime(eve.start_ts) : 'Таймер не запущен'}</span>
+      <span class="badge ${eve ? 'on' : ''}">${eve ? KIND_LABEL[eve.kind] + ' — идёт с ' + fmtTime(eve.start_ts) : 'Таймер не запущен'}</span>
       <div class="timer" id="etimer" style="font-size:1.8rem">${eve ? '' : '00:00:00'}</div>
-      ${s.todayEvening.length ? `<div class="muted">Сегодня вечернего времени: ${sumHours(s.todayEvening)} ч</div>` : ''}
+      ${s.todayEvening.length ? `<div class="muted">Сегодня вечером / удалённо: ${sumHours(s.todayEvening)} ч</div>` : ''}
     </div>
     <div class="row">
-      <button class="btn" id="estart" ${eve || open ? 'disabled' : ''}>Начать вечернее время</button>
-      <button class="btn ghost" id="efinish" ${eve ? '' : 'disabled'}>Закончить вечернее время</button>
+      <button class="btn" id="estart" ${eve || open ? 'disabled' : ''}>Начать</button>
+      <button class="btn ghost" id="efinish" ${eve ? '' : 'disabled'}>Закончить</button>
     </div>
     ${open ? '<p class="muted" style="margin:10px 0 0">Сначала завершите работу в офисе.</p>' : ''}
   </div>
@@ -185,7 +191,7 @@ async function renderWorker(into, withHeader = true) {
       `<tr><td>${esc(d.title)}</td><td><a href="/api/docs/${d.id}/file">${esc(d.filename)}</a> <span class="muted">${fmtSize(d.size)}</span></td><td>${fmtDT(d.created_at)}</td></tr>`).join('')}</table>` : '<div class="empty">Заявлений пока нет</div>'}</div>
   </div>
   <div class="card"><h2>Мои отметки</h2><div class="tablewrap">${s.history.length ? `<table><tr><th>Дата</th><th>Тип</th><th>Начало</th><th>Конец</th><th>Часов</th></tr>${s.history.map(r =>
-    `<tr><td>${fmtDate(r.date)}</td><td>${kindPill(r.kind)}</td><td>${fmtTime(r.start_ts)}</td><td>${r.end_ts ? fmtTime(r.end_ts) : `<span class="pill green">${r.kind === 'evening' ? 'идёт' : 'на месте'}</span>`}${r.end_manual ? ' <span class="mark">указано вручную</span>' : ''}</td><td>${hours(r.start_ts, r.end_ts)}</td></tr>`).join('')}</table>` : '<div class="empty">Пока пусто</div>'}</div></div>`;
+    `<tr><td>${fmtDate(r.date)}</td><td>${kindPill(r.kind)}</td><td>${fmtTime(r.start_ts)}</td><td>${r.end_ts ? fmtTime(r.end_ts) : `<span class="pill green">${r.kind === 'office' ? 'на месте' : 'идёт'}</span>`}${r.end_manual ? ' <span class="mark">указано вручную</span>' : ''}</td><td>${hours(r.start_ts, r.end_ts)}</td></tr>`).join('')}</table>` : '<div class="empty">Пока пусто</div>'}</div></div>`;
 
   clearInterval(timerId);
   const running = open ? [open, 'timer'] : eve ? [eve, 'etimer'] : null;
@@ -202,11 +208,13 @@ async function renderWorker(into, withHeader = true) {
     tick(); timerId = setInterval(tick, 1000);
   }
   const reload = () => renderWorker(into, withHeader);
-  const mark = (id, path, kind, msg) => into.querySelector(id).onclick = () => act(async () => { await api(path, 'POST', { kind }); toast(msg); reload(); });
+  const mark = (id, path, kind, msg) => into.querySelector(id).onclick = () => act(async () => {
+    await api(path, 'POST', { kind: typeof kind === 'function' ? kind() : kind }); toast(msg); reload();
+  });
   mark('#start', '/api/start', 'office', 'Начало работы отмечено');
   mark('#finish', '/api/finish', 'office', 'Окончание работы отмечено');
-  mark('#estart', '/api/start', 'evening', 'Вечернее время запущено');
-  mark('#efinish', '/api/finish', 'evening', 'Вечернее время завершено');
+  mark('#estart', '/api/start', () => into.querySelector('#ekind').value, 'Таймер запущен');
+  mark('#efinish', '/api/finish', () => eve?.kind, 'Таймер остановлен');
   if (running) {
     const [rec] = running, kind = rec.kind;
     onTick = () => { if (needAsk(rec)) askStillWorking(rec, kind, reload); };
@@ -227,7 +235,7 @@ async function renderWorker(into, withHeader = true) {
 }
 
 // ---------- панель администратора ----------
-const ADMIN_TABS = [['today', 'Сегодня'], ['records', 'Отметки'], ['evening', 'Вечернее время'], ['docs', 'Заявления'], ['log', 'Журнал действий'], ['users', 'Сотрудники'], ['me', 'Моя отметка']];
+const ADMIN_TABS = [['today', 'Сегодня'], ['records', 'Отметки'], ['evening', 'Вечером / удалённо'], ['docs', 'Заявления'], ['log', 'Журнал действий'], ['users', 'Сотрудники'], ['me', 'Моя отметка']];
 let adminTab = 'today';
 
 async function renderAdmin() {
@@ -262,7 +270,7 @@ async function tabToday(pane) {
   const inside = people.filter(p => p.open_since).length;
   pane.innerHTML = `<div class="card"><h2>Кто на рабочем месте — ${fmtDate(today)}</h2>
     <p class="muted">Сейчас на месте: ${inside} из ${people.length}</p>
-    ${table(['ФИО', 'Статус', 'Пришёл(ла)', 'Ушёл(ла)', 'Вечернее'], people.map(p => [
+    ${table(['ФИО', 'Статус', 'Пришёл(ла)', 'Ушёл(ла)', 'Вечером / удалённо'], people.map(p => [
       esc(p.fio) + (p.role === 'admin' ? ' <span class="pill blue">админ</span>' : ''),
       p.open_since ? '<span class="pill green">на месте</span>' : (p.first_start ? '<span class="pill">ушёл(ла)</span>' : '<span class="pill">не отмечался(ась)</span>'),
       fmtTime(p.first_start), p.open_since ? '—' : fmtTime(p.last_end),
@@ -289,7 +297,7 @@ async function tabRecords(pane) {
 
 async function tabEvening(pane) {
   const rows = await api('/api/admin/evening');
-  pane.innerHTML = `<div class="card"><h2>Вечернее время</h2>${table(['Сотрудник', 'Дата', 'Начало', 'Конец', 'Часов'], rows.map(r => [esc(r.fio), fmtDate(r.date), fmtTime(r.start_ts), r.end_ts ? fmtTime(r.end_ts) : '<span class="pill amber">идёт</span>', hours(r.start_ts, r.end_ts)]))}</div>`;
+  pane.innerHTML = `<div class="card"><h2>Вечернее время и удалённая работа</h2>${table(['Сотрудник', 'Тип', 'Дата', 'Начало', 'Конец', 'Часов'], rows.map(r => [esc(r.fio), kindPill(r.kind), fmtDate(r.date), fmtTime(r.start_ts), r.end_ts ? fmtTime(r.end_ts) : '<span class="pill amber">идёт</span>', hours(r.start_ts, r.end_ts)]))}</div>`;
 }
 
 async function tabDocs(pane) {

@@ -26,7 +26,7 @@
       d.records.push({ id: d.records.length + 1, user_id: uid, date: s.toLocaleDateString('sv'), start_ts: s.toISOString(), end_ts: e.toISOString(), kind, end_manual: 0, confirmed_ts: null });
     };
     for (let i = 1; i <= 5; i++) { rec(2, i, 9, 18); rec(3, i, 8, 17); rec(4, i, 10, 19); }
-    rec(2, 2, 20, 22, 'evening'); rec(3, 3, 19, 21, 'evening');
+    rec(2, 2, 20, 22, 'evening'); rec(3, 3, 19, 21, 'evening'); rec(4, 1, 20, 22, 'remote');
     return d;
   }
   let mem = null;
@@ -43,14 +43,17 @@
   const addLog = (uid, action, details = '') => db.log.push({ id: nextId(db.log), user_id: uid, action, details, ts: now() });
 
   // ---------- логика (повторяет server.js) ----------
-  const KINDS = { office: 'работу в офисе', evening: 'вечернее время' };
+  const KINDS = { office: 'работу в офисе', evening: 'вечернее время', remote: 'удалённую работу' };
+  const LABELS = { office: 'офис', evening: 'вечернее время', remote: 'удалённо' };
+  const parseKind = k => (k === 'evening' || k === 'remote') ? k : 'office';
   const openOf = (uid, kind) => [...db.records].reverse().find(r => r.user_id === uid && r.kind === kind && !r.end_ts) || null;
+  const openExtra = uid => [...db.records].reverse().find(r => r.user_id === uid && r.kind !== 'office' && !r.end_ts) || null;
   function myState(uid) {
     const d = today(), mine = db.records.filter(r => r.user_id === uid);
     return {
-      today: d, open: openOf(uid, 'office'), openEvening: openOf(uid, 'evening'),
+      today: d, open: openOf(uid, 'office'), openEvening: openExtra(uid),
       todayRecords: mine.filter(r => r.date === d && r.kind === 'office'),
-      todayEvening: mine.filter(r => r.date === d && r.kind === 'evening'),
+      todayEvening: mine.filter(r => r.date === d && r.kind !== 'office'),
       history: [...mine].reverse().slice(0, 60),
       docs: db.docs.filter(x => x.user_id === uid).reverse().map(({ data, ...x }) => x),
     };
@@ -62,7 +65,7 @@
   function recordsQuery(q) {
     return [...db.records].reverse().filter(r =>
       (!q.user || r.user_id === +q.user) && (!q.from || r.date >= q.from) && (!q.to || r.date <= q.to) &&
-      (!q.kind || r.kind === q.kind)).slice(0, 1000)
+      (!q.kind || (q.kind === 'extra' ? r.kind !== 'office' : r.kind === q.kind))).slice(0, 1000)
       .map(r => ({ id: r.id, date: r.date, start_ts: r.start_ts, end_ts: r.end_ts, kind: r.kind, end_manual: r.end_manual, fio: user(r.user_id).fio, user_id: r.user_id }));
   }
   function csv(q) {
@@ -70,7 +73,7 @@
     const fmt = t => t ? new Date(t).toLocaleString('ru-RU') : '';
     const lines = ['ФИО;Тип;Дата;Начало;Конец;Часов'].concat(recordsQuery(q).map(r => {
       const h = r.end_ts ? ((new Date(r.end_ts) - new Date(r.start_ts)) / 3600000).toFixed(2) : '';
-      return [r.fio, r.kind === 'evening' ? 'вечернее время' : 'офис', r.date, fmt(r.start_ts), fmt(r.end_ts), h].map(esc).join(';');
+      return [r.fio, LABELS[r.kind] || 'офис', r.date, fmt(r.start_ts), fmt(r.end_ts), h].map(esc).join(';');
     }));
     return '﻿' + lines.join('\r\n');
   }
@@ -104,15 +107,15 @@
     }
     if (method === 'GET' && path === '/api/my') return myState(me.id);
     if (method === 'POST' && path === '/api/start') {
-      const kind = b.kind === 'evening' ? 'evening' : 'office';
+      const kind = parseKind(b.kind);
       const open = db.records.find(r => r.user_id === me.id && !r.end_ts);
       if (open) fail(400, open.kind === kind ? 'Вы уже отметили начало' : `Сначала завершите ${KINDS[open.kind]}`);
       db.records.push({ id: nextId(db.records), user_id: me.id, date: today(), start_ts: now(), end_ts: null, kind, end_manual: 0, confirmed_ts: null });
-      addLog(me.id, kind === 'evening' ? 'Начал(а) вечернее время' : 'Начал(а) работу');
+      addLog(me.id, kind === 'office' ? 'Начал(а) работу' : `Начал(а): ${LABELS[kind]}`);
       return myState(me.id);
     }
     if (method === 'POST' && path === '/api/finish') {
-      const kind = b.kind === 'evening' ? 'evening' : 'office';
+      const kind = parseKind(b.kind);
       const open = openOf(me.id, kind);
       if (!open) fail(400, 'Сначала отметьте начало');
       let end = now(), manual = 0;
@@ -123,12 +126,12 @@
         end = t.toISOString(); manual = 1;
       }
       open.end_ts = end; open.end_manual = manual;
-      const what = kind === 'evening' ? 'Закончил(а) вечернее время' : 'Закончил(а) работу';
+      const what = kind === 'office' ? 'Закончил(а) работу' : `Закончил(а): ${LABELS[kind]}`;
       addLog(me.id, manual ? what + ' (время указано вручную)' : what, manual ? `Указано окончание: ${new Date(end).toLocaleString('ru-RU')}` : '');
       return myState(me.id);
     }
     if (method === 'POST' && path === '/api/confirm') {
-      const open = openOf(me.id, b.kind === 'evening' ? 'evening' : 'office');
+      const open = openOf(me.id, parseKind(b.kind));
       if (!open) fail(400, 'Нет активной отметки');
       open.confirmed_ts = now(); addLog(me.id, 'Подтвердил(а), что ещё работает'); return myState(me.id);
     }
@@ -152,17 +155,17 @@
         const d = today();
         return { today: d, people: db.users.filter(u => u.active).sort((a, c) => a.fio.localeCompare(c.fio)).map(u => {
           const off = db.records.filter(r => r.user_id === u.id && r.kind === 'office' && r.date === d);
-          const ev = db.records.filter(r => r.user_id === u.id && r.kind === 'evening');
+          const ev = db.records.filter(r => r.user_id === u.id && r.kind !== 'office');
           return { id: u.id, fio: u.fio, login: u.login, role: u.role,
             open_since: openOf(u.id, 'office')?.start_ts || null,
             first_start: off.map(r => r.start_ts).sort()[0] || null,
             last_end: off.map(r => r.end_ts).filter(Boolean).sort().pop() || null,
-            evening_open: openOf(u.id, 'evening')?.start_ts || null,
+            evening_open: openExtra(u.id)?.start_ts || null,
             evening: ev.filter(r => r.date === d).length };
         }) };
       }
       if (path === '/api/admin/records') return recordsQuery(q);
-      if (path === '/api/admin/evening') return recordsQuery({ ...q, kind: 'evening' });
+      if (path === '/api/admin/evening') return recordsQuery({ ...q, kind: 'extra' });
       if (path === '/api/admin/resets') return db.resets.filter(r => !r.done).map(r => ({ id: r.id, created_at: r.created_at, user_id: r.user_id, fio: user(r.user_id).fio, login: user(r.user_id).login }));
       if (path === '/api/admin/log') return [...db.log].reverse().slice(0, 500).map(l => ({ id: l.id, ts: l.ts, action: l.action, details: l.details, fio: l.user_id ? user(l.user_id)?.fio : null }));
       if (path === '/api/admin/docs') return [...db.docs].reverse().map(({ data, mime, user_id, ...x }) => ({ ...x, fio: user(user_id).fio }));

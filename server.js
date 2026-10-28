@@ -162,16 +162,18 @@ function send(res, code, body, headers = {}) {
 const ALLOWED_EXT = new Set(['.pdf', '.doc', '.docx', '.odt', '.xls', '.xlsx', '.jpg', '.jpeg', '.png', '.txt']);
 const cleanText = (s, max = 200) => String(s ?? '').trim().slice(0, max);
 
-const KINDS = { office: 'работу в офисе', evening: 'вечернее время' };
+const KINDS = { office: 'работу в офисе', evening: 'вечернее время', remote: 'удалённую работу' };
+const LABELS = { office: 'офис', evening: 'вечернее время', remote: 'удалённо' };
+const parseKind = k => (k === 'evening' || k === 'remote') ? k : 'office';
 function myState(uid) {
   const d = today();
   const openOf = kind => db.prepare('SELECT * FROM records WHERE user_id=? AND kind=? AND end_ts IS NULL ORDER BY id DESC LIMIT 1').get(uid, kind) || null;
   return {
     today: d,
     open: openOf('office'),
-    openEvening: openOf('evening'),
+    openEvening: db.prepare("SELECT * FROM records WHERE user_id=? AND kind!='office' AND end_ts IS NULL ORDER BY id DESC LIMIT 1").get(uid) || null,
     todayRecords: db.prepare("SELECT * FROM records WHERE user_id=? AND date=? AND kind='office' ORDER BY id").all(uid, d),
-    todayEvening: db.prepare("SELECT * FROM records WHERE user_id=? AND date=? AND kind='evening' ORDER BY id").all(uid, d),
+    todayEvening: db.prepare("SELECT * FROM records WHERE user_id=? AND date=? AND kind!='office' ORDER BY id").all(uid, d),
     history: db.prepare('SELECT * FROM records WHERE user_id=? ORDER BY id DESC LIMIT 60').all(uid),
     docs: db.prepare('SELECT id,title,filename,size,created_at FROM docs WHERE user_id=? ORDER BY id DESC').all(uid),
   };
@@ -184,8 +186,8 @@ function adminOverview() {
       (SELECT start_ts FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.end_ts IS NULL ORDER BY id DESC LIMIT 1) AS open_since,
       (SELECT MIN(start_ts) FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.date=?) AS first_start,
       (SELECT MAX(end_ts) FROM records r WHERE r.user_id=u.id AND r.kind='office' AND r.date=?) AS last_end,
-      (SELECT start_ts FROM records r WHERE r.user_id=u.id AND r.kind='evening' AND r.end_ts IS NULL ORDER BY id DESC LIMIT 1) AS evening_open,
-      (SELECT COUNT(*) FROM records r WHERE r.user_id=u.id AND r.kind='evening' AND r.date=?) AS evening
+      (SELECT start_ts FROM records r WHERE r.user_id=u.id AND r.kind!='office' AND r.end_ts IS NULL ORDER BY id DESC LIMIT 1) AS evening_open,
+      (SELECT COUNT(*) FROM records r WHERE r.user_id=u.id AND r.kind!='office' AND r.date=?) AS evening
     FROM users u WHERE u.active=1 ORDER BY u.fio`).all(d, d, d);
 }
 
@@ -194,7 +196,8 @@ function recordsQuery(q) {
   if (q.user) { where.push('r.user_id=?'); args.push(+q.user); }
   if (q.from) { where.push('r.date>=?'); args.push(q.from); }
   if (q.to) { where.push('r.date<=?'); args.push(q.to); }
-  if (q.kind === 'office' || q.kind === 'evening') { where.push('r.kind=?'); args.push(q.kind); }
+  if (q.kind === 'extra') where.push("r.kind!='office'"); // вечернее время и удалённая работа
+  else if (q.kind === 'office' || q.kind === 'evening' || q.kind === 'remote') { where.push('r.kind=?'); args.push(q.kind); }
   return db.prepare(`
     SELECT r.id,r.date,r.start_ts,r.end_ts,r.kind,r.end_manual,u.fio,u.id AS user_id
     FROM records r JOIN users u ON u.id=r.user_id
@@ -266,16 +269,16 @@ async function api(req, res, url) {
     case 'GET /api/my': return send(res, 200, myState(user.id));
     case 'POST /api/start': {
       const b = await readJson(req);
-      const kind = b.kind === 'evening' ? 'evening' : 'office';
+      const kind = parseKind(b.kind);
       const open = db.prepare('SELECT kind FROM records WHERE user_id=? AND end_ts IS NULL').get(user.id);
       if (open) fail(400, open.kind === kind ? 'Вы уже отметили начало' : `Сначала завершите ${KINDS[open.kind]}`);
       db.prepare('INSERT INTO records(user_id,date,start_ts,kind) VALUES(?,?,?,?)').run(user.id, today(), now(), kind);
-      addLog(user.id, kind === 'evening' ? 'Начал(а) вечернее время' : 'Начал(а) работу');
+      addLog(user.id, kind === 'office' ? 'Начал(а) работу' : `Начал(а): ${LABELS[kind]}`);
       return send(res, 200, myState(user.id));
     }
     case 'POST /api/finish': {
       const b = await readJson(req);
-      const kind = b.kind === 'evening' ? 'evening' : 'office';
+      const kind = parseKind(b.kind);
       const open = db.prepare('SELECT * FROM records WHERE user_id=? AND kind=? AND end_ts IS NULL ORDER BY id DESC').get(user.id, kind);
       if (!open) fail(400, 'Сначала отметьте начало');
       let end = now(), manual = 0;
@@ -286,18 +289,18 @@ async function api(req, res, url) {
         end = t.toISOString(); manual = 1;
       }
       db.prepare('UPDATE records SET end_ts=?, end_manual=? WHERE id=?').run(end, manual, open.id);
-      const what = kind === 'evening' ? 'Закончил(а) вечернее время' : 'Закончил(а) работу';
+      const what = kind === 'office' ? 'Закончил(а) работу' : `Закончил(а): ${LABELS[kind]}`;
       addLog(user.id, manual ? what + ' (время указано вручную)' : what,
         manual ? `Указано окончание: ${new Date(end).toLocaleString('ru-RU')}; отметка сделана ${new Date().toLocaleString('ru-RU')}` : '');
       return send(res, 200, myState(user.id));
     }
     case 'POST /api/confirm': {
       const b = await readJson(req);
-      const kind = b.kind === 'evening' ? 'evening' : 'office';
+      const kind = parseKind(b.kind);
       const open = db.prepare('SELECT * FROM records WHERE user_id=? AND kind=? AND end_ts IS NULL ORDER BY id DESC').get(user.id, kind);
       if (!open) fail(400, 'Нет активной отметки');
       db.prepare('UPDATE records SET confirmed_ts=? WHERE id=?').run(now(), open.id);
-      addLog(user.id, 'Подтвердил(а), что ещё работает', kind === 'evening' ? 'вечернее время' : 'офис');
+      addLog(user.id, 'Подтвердил(а), что ещё работает', LABELS[kind]);
       return send(res, 200, myState(user.id));
     }
     case 'POST /api/docs': {
@@ -342,7 +345,7 @@ async function api(req, res, url) {
       case 'GET /api/admin/overview': return send(res, 200, { today: today(), people: adminOverview() });
       case 'GET /api/admin/records': return send(res, 200, recordsQuery(q));
       case 'GET /api/admin/evening':
-        return send(res, 200, recordsQuery({ ...q, kind: 'evening' }));
+        return send(res, 200, recordsQuery({ ...q, kind: 'extra' }));
       case 'GET /api/admin/resets':
         return send(res, 200, db.prepare(`SELECT r.id,r.created_at,u.id AS user_id,u.fio,u.login FROM reset_requests r JOIN users u ON u.id=r.user_id WHERE r.done=0 ORDER BY r.id`).all());
       case 'GET /api/admin/log':
@@ -369,7 +372,7 @@ async function api(req, res, url) {
         const fmt = t => t ? new Date(t).toLocaleString('ru-RU') : '';
         const lines = ['ФИО;Тип;Дата;Начало;Конец;Часов'].concat(rows.map(r => {
           const h = r.end_ts ? ((new Date(r.end_ts) - new Date(r.start_ts)) / 3600000).toFixed(2) : '';
-          return [r.fio, r.kind === 'evening' ? 'вечернее время' : 'офис', r.date, fmt(r.start_ts), fmt(r.end_ts), h].map(esc).join(';');
+          return [r.fio, LABELS[r.kind] || 'офис', r.date, fmt(r.start_ts), fmt(r.end_ts), h].map(esc).join(';');
         }));
         return send(res, 200, '﻿' + lines.join('\r\n'), {
           'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="tabel.csv"',
