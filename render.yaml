@@ -1,0 +1,13 @@
+# Демо-выкладка на Render (бесплатный тариф): данные не сохраняются между перезапусками.
+services:
+  - type: web
+    name: office-time-tracker
+    runtime: node
+    plan: free
+    buildCommand: echo "no build"
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DEMO_MODE
+        value: "1"

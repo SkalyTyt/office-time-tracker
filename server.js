@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS docs(
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL,
   filename TEXT NOT NULL, stored TEXT NOT NULL, mime TEXT, size INTEGER,
   created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reset_requests(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT NOT NULL,
+  done INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS log(
   id INTEGER PRIMARY KEY, user_id INTEGER, action TEXT NOT NULL,
   details TEXT, ts TEXT NOT NULL);
@@ -79,10 +82,24 @@ function addLog(userId, action, details = '') {
 class HttpError extends Error { constructor(code, msg) { super(msg); this.code = code; } }
 const fail = (code, msg) => { throw new HttpError(code, msg); };
 
+// Демо-режим (DEMO_MODE=1): готовые аккаунты для показа, пароли демо-аккаунтов менять нельзя.
+const DEMO = process.env.DEMO_MODE === '1';
+const DEMO_LOGINS = new Set(['admin', 'test']);
+const demoLock = u => { if (DEMO && DEMO_LOGINS.has(u.login)) fail(403, 'В демо-режиме пароль этого аккаунта менять нельзя'); };
+
 // Первый запуск: создаём администратора
 if (!db.prepare('SELECT 1 FROM users LIMIT 1').get()) {
-  makeUser('admin', 'Администратор', 'admin123', 'admin', 1);
-  console.log('Создан администратор: логин admin / пароль admin123 (будет предложено сменить)');
+  if (DEMO) {
+    makeUser('admin', 'Администратор', 'admin123', 'admin', 0);
+    makeUser('test', 'Томилов', 'test123', 'worker', 0);
+    console.log('Демо-режим: admin / admin123 (администратор), test / test123 (сотрудник)');
+  } else if (process.env.ADMIN_PASSWORD) {
+    makeUser('admin', 'Администратор', process.env.ADMIN_PASSWORD, 'admin', 0);
+    console.log('Создан администратор: логин admin, пароль из переменной ADMIN_PASSWORD');
+  } else {
+    makeUser('admin', 'Администратор', 'admin123', 'admin', 1);
+    console.log('Создан администратор: логин admin / пароль admin123 (будет предложено сменить)');
+  }
 }
 
 // ---------- сессии ----------
@@ -190,7 +207,22 @@ function adminCount() {
 
 async function api(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
-  const ip = req.socket.remoteAddress;
+  // за прокси (хостинг) реальный адрес приходит в X-Forwarded-For
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+  const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+
+  if (route === 'POST /api/forgot') {
+    // «Забыли пароль»: заявка администратору, пароль он задаёт и передаёт сам
+    checkRate(ip);
+    const b = await readJson(req);
+    const u = db.prepare('SELECT * FROM users WHERE login=? AND active=1').get(cleanText(b.login, 64).toLowerCase());
+    noteFail(ip); // ограничиваем частоту заявок так же, как попытки входа
+    if (u && !db.prepare('SELECT 1 FROM reset_requests WHERE user_id=? AND done=0').get(u.id)) {
+      db.prepare('INSERT INTO reset_requests(user_id,created_at) VALUES(?,?)').run(u.id, now());
+      addLog(u.id, 'Запросил(а) новый пароль');
+    }
+    return send(res, 200, { ok: true }); // ответ одинаковый, чтобы нельзя было подбирать логины
+  }
 
   if (route === 'POST /api/login') {
     checkRate(ip);
@@ -203,7 +235,7 @@ async function api(req, res, url) {
     db.prepare('INSERT INTO sessions(token,user_id,expires) VALUES(?,?,?)').run(token, u.id, Date.now() + SESSION_MS);
     addLog(u.id, 'Вход в систему');
     return send(res, 200, { user: publicUser(u) }, {
-      'Set-Cookie': `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}`,
+      'Set-Cookie': `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}${secure}`,
     });
   }
 
@@ -223,6 +255,7 @@ async function api(req, res, url) {
     case 'GET /api/me': return send(res, 200, { user: publicUser(user) });
     case 'POST /api/password': {
       if (!isAdmin) fail(403, 'Пароль может изменить только администратор');
+      demoLock(user);
       const b = await readJson(req);
       if (!b.password || String(b.password).length < 6) fail(400, 'Пароль должен быть не короче 6 символов');
       if (b.password === 'admin123') fail(400, 'Выберите другой пароль');
@@ -310,6 +343,8 @@ async function api(req, res, url) {
       case 'GET /api/admin/records': return send(res, 200, recordsQuery(q));
       case 'GET /api/admin/evening':
         return send(res, 200, recordsQuery({ ...q, kind: 'evening' }));
+      case 'GET /api/admin/resets':
+        return send(res, 200, db.prepare(`SELECT r.id,r.created_at,u.id AS user_id,u.fio,u.login FROM reset_requests r JOIN users u ON u.id=r.user_id WHERE r.done=0 ORDER BY r.id`).all());
       case 'GET /api/admin/log':
         return send(res, 200, db.prepare(`SELECT l.id,l.ts,l.action,l.details,u.fio FROM log l LEFT JOIN users u ON u.id=l.user_id ORDER BY l.id DESC LIMIT 500`).all());
       case 'GET /api/admin/docs':
@@ -369,7 +404,9 @@ async function api(req, res, url) {
       }
       if (b.password !== undefined) {
         if (String(b.password).length < 6) fail(400, 'Пароль должен быть не короче 6 символов');
+        demoLock(target);
         setPassword(target.id, String(b.password));
+        db.prepare('UPDATE reset_requests SET done=1 WHERE user_id=?').run(target.id);
         db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
         addLog(user.id, 'Сбросил(а) пароль', target.fio);
       }

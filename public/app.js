@@ -40,12 +40,36 @@ function viewLogin(err = '') {
       <label>Пароль</label><input name="password" type="password" autocomplete="current-password" required>
       <p class="err" id="err">${esc(err)}</p>
       <button class="btn big" style="font-size:1.05rem;padding:12px">Войти</button>
-    </form></div></div>`;
+    </form>
+    <button class="btn ghost" id="forgot" style="width:100%;margin-top:10px">Забыли пароль?</button></div></div>`;
+  document.getElementById('forgot').onclick = viewForgot;
   document.getElementById('f').onsubmit = async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     try { me = (await api('/api/login', 'POST', fd)).user; render(); }
     catch (x) { document.getElementById('err').textContent = x.message; }
+  };
+}
+
+function viewForgot() {
+  $app.innerHTML = `
+  <div class="wrap login"><div class="card">
+    <h1>Забыли пароль?</h1>
+    <p class="muted">Введите свой логин. Заявка уйдёт администратору — он задаст новый пароль и сообщит его вам.</p>
+    <form id="f"><label>Логин</label><input name="login" autocomplete="username" autofocus required>
+    <p class="err" id="err"></p>
+    <button class="btn big" style="font-size:1.05rem;padding:12px">Отправить заявку</button></form>
+    <button class="btn ghost" id="back" style="width:100%;margin-top:10px">Назад ко входу</button></div></div>`;
+  document.getElementById('back').onclick = () => viewLogin();
+  document.getElementById('f').onsubmit = async e => {
+    e.preventDefault();
+    try {
+      await api('/api/forgot', 'POST', Object.fromEntries(new FormData(e.target)));
+      $app.querySelector('.card').innerHTML = `<h1>Заявка отправлена</h1>
+        <p class="muted">Если такой логин есть, администратор увидит вашу заявку, задаст новый пароль и передаст его вам лично.</p>
+        <button class="btn big" id="ok" style="font-size:1.05rem;padding:12px">Ко входу</button>`;
+      document.getElementById('ok').onclick = () => viewLogin();
+    } catch (x) { document.getElementById('err').textContent = x.message; }
   };
 }
 
@@ -207,9 +231,21 @@ const ADMIN_TABS = [['today', 'Сегодня'], ['records', 'Отметки'], 
 let adminTab = 'today';
 
 async function renderAdmin() {
+  const resets = await api('/api/admin/resets').catch(() => []);
   $app.innerHTML = `<div class="wrap wide">${header()}<div class="tabs">${ADMIN_TABS.map(([k, n]) =>
-    `<button class="tab ${k === adminTab ? 'on' : ''}" data-t="${k}">${n}</button>`).join('')}</div><div id="pane"></div></div>`;
+    `<button class="tab ${k === adminTab ? 'on' : ''}" data-t="${k}">${n}${k === 'users' && resets.length ? ` <span class="pill amber">${resets.length}</span>` : ''}</button>`).join('')}</div>
+    ${resets.length ? `<div class="card"><h2>Запросы на новый пароль</h2>${resets.map(r =>
+      `<div class="row" style="align-items:center;margin-top:8px"><div><b>${esc(r.fio)}</b> <span class="muted">(${esc(r.login)}) · ${fmtDT(r.created_at)}</span></div>
+       <button class="btn small" data-reset="${r.user_id}">Задать новый пароль</button></div>`).join('')}
+      <p class="muted" style="margin-top:10px">Задайте пароль и сообщите его сотруднику лично — сайт ему ничего не отправляет.</p></div>` : ''}
+    <div id="pane"></div></div>`;
   bindHeader();
+  $app.querySelectorAll('[data-reset]').forEach(b => b.onclick = () => act(async () => {
+    const p = prompt('Новый пароль для сотрудника (не короче 6 символов):');
+    if (!p) return;
+    await api('/api/admin/users/' + b.dataset.reset, 'PATCH', { password: p });
+    toast('Пароль изменён — сообщите его сотруднику'); renderAdmin();
+  }));
   $app.querySelectorAll('.tab').forEach(b => b.onclick = () => { adminTab = b.dataset.t; renderAdmin(); });
   const pane = document.getElementById('pane');
   clearInterval(timerId);
