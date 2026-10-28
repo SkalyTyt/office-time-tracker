@@ -60,5 +60,27 @@ th { color: var(--muted); font-weight: 500; font-size: .85rem; }
 .modal .btns { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
 .modal .btns .btn { flex: 1 1 140px; }
 .mark { font-size: .8rem; color: var(--muted); }
+/* ---------- мобильная версия ---------- */
+.btn, .tab, select, input { min-height: 44px; }
+.btn.small { min-height: 38px; }
+@media (max-width: 640px) {
+  .wrap { padding: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .card { padding: 14px; border-radius: 12px; margin-bottom: 12px; }
+  .top { flex-wrap: wrap; }
+  .top .who { font-size: 1.1rem; }
+  .big { padding: 22px 12px; font-size: 1.25rem; }
+  .status .timer { font-size: 2.1rem; }
+  .login { margin-top: 6vh; }
+  .row > * { flex: 1 1 100%; }
+  .row > .btn { flex: 1 1 100%; }
+  .tabs { flex-wrap: nowrap; overflow-x: auto; margin: 0 -10px 12px; padding: 0 10px 4px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { white-space: nowrap; flex: 0 0 auto; }
+  table { font-size: .85rem; }
+  th, td { padding: 7px 6px; white-space: nowrap; }
+  td:first-child { white-space: normal; min-width: 110px; }
+  .modal { padding: 18px; }
+  #toast { width: calc(100% - 24px); text-align: center; }
+}
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(80px); background: #263042; color: #fff; padding: 10px 18px; border-radius: 12px; opacity: 0; transition: .25s; pointer-events: none; z-index: 9; }
 #toast.show { opacity: 1; transform: translateX(-50%); }
